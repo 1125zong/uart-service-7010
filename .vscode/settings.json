@@ -1,0 +1,10 @@
+{
+   "clangd.arguments": [
+    "--background-index",
+    "--compile-commands-dir=${workspaceFolder}",
+    "--header-insertion=never",
+    "--clang-tidy=false"
+  ],
+  "clangd.path": "clangd",  
+  "clangd.diagnostics.enable": false
+}

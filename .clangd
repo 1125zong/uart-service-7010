@@ -1,0 +1,26 @@
+CompileFlags:
+  Add:
+    - -std=c99
+    - -D_REENTRANT
+    - -D_GNU_SOURCE
+    - -DGCC_WIN32
+    - -I./HAL
+    - -I./APP/inc
+    - -I./APP/screen
+    - -I./APP/report
+    - -I./APP/core
+    - -I./main
+  Remove:
+    - -mfloat-abi=*
+
+Diagnostics:
+  SuppressAll: true
+
+InlayHints:
+  Enabled: No
+
+Hover:
+  ShowAKA: No
+
+Index:
+  Background: Build

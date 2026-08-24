@@ -1,0 +1,73 @@
+a_magic_num=2026-0310-1400
+arch=arm
+autoload_fpga=1
+baudrate=115200
+bitstream_a_size=168a32
+bitstream_b_size=0x180000
+bitstream_file=top_7015.bit
+board=zynq
+board_name=zynq
+boot_full=if test ${autoload_fpga} = 1; then run load_bitstream; fi && run bootcmd_spi
+bootargs=ttyPS0,115200 root=/dev/ram0 rw quiet loglevel=0
+bootcmd=run boot_full
+bootcmd_spi=if test ${bootpart} = 0; then run bootcmd_spi_a; else run bootcmd_spi_b; fi
+bootcmd_spi_a=echo "booting from parttion A..."; run spi_init && sf read ${kernel_addr_r} ${spi_image_a} ${image_a_size} && bootm ${kernel_addr_r}
+bootcmd_spi_b=echo "booting from parttion B...";run spi_init && sf read ${kernel_addr_r} ${spi_image_b} ${image_b_size} && bootm ${kernel_addr_r}
+bootcmd_tftp=tftpboot ${kernel_addr_r} ${image_file} && bootm ${kernel_addr_r}
+bootcount=0
+bootdelay=2
+bootlimit=3
+bootpart=0
+config_file=config.bin
+cpu=armv7
+dxh=1
+ethact=ethernet@e000c000
+fdt_addr_r=0x1f00000
+fdt_high=0x20000000
+fdtcontroladdr=3eb07e08
+fileaddr=2000000
+filesize=b6af28
+fpgapart=0
+image_a_size=0xb6af28
+image_b_size=0xb6af28
+image_file=image.ub
+initrd_high=0x20000000
+ipaddr=192.168.8.10
+kernel_addr_r=0x2000000
+load_bitstream=if test ${fpgapart} = 0; then run load_bitstream_a; else run load_bitstream_b; fi
+load_bitstream_a=run spi_init && sf read ${kernel_addr_r} ${spi_bitstream_a} ${bitstream_a_size} && fpga loadb 0 ${kernel_addr_r} ${bitstream_a_size}
+load_bitstream_b=run spi_init && sf read ${kernel_addr_r} ${spi_bitstream_b} ${bitstream_b_size} && fpga loadb 0 ${kernel_addr_r} ${bitstream_b_size}
+load_config=run spi_init && sf read ${kernel_addr_r} ${spi_config} ${spi_config_size}
+pxefile_addr_r=0x2000000
+ramdisk_addr_r=0x3100000
+save_config=tftpboot ${kernel_addr_r} ${config_file} && run spi_init && sf erase ${spi_config} ${spi_config_size} && sf write ${kernel_addr_r} ${spi_config} ${filesize}
+script_size_f=0x40000
+scriptaddr=0x3000000
+serverip=192.168.8.123
+soc=zynq
+spi_bitstream_a=0x240000
+spi_bitstream_b=0x440000
+spi_bitstream_max=0x200000
+spi_bootenv=0x100000
+spi_bootenv_size=0x40000
+spi_config=0x140000
+spi_config_size=0x100000
+spi_image_a=0x640000
+spi_image_b=0x1240000
+spi_image_max=0xC00000
+spi_init=sf probe 0 0 0
+stderr=serial@e0000000
+stdin=serial@e0000000
+stdout=serial@e0000000
+switch_a=setenv bootpart 0 && setenv bootcount 0 && saveenv && echo Switched to partition A
+switch_b=setenv bootpart 1 && setenv bootcount 0 && saveenv && echo Switched to partition B
+switch_fpga_a=setenv fpgapart 0 && saveenv && echo FPGA switched to partition A
+switch_fpga_b=setenv fpgapart 1 && saveenv && echo FPGA switched to partition B
+update_bitstream_a=tftpboot ${kernel_addr_r} ${bitstream_file} && run spi_init && sf erase ${spi_bitstream_a} ${spi_bitstream_max} && sf write ${kernel_addr_r} ${spi_bitstream_a} ${filesize} && setenv bitstream_a_size ${filesize} && saveenv && echo bitstream_a updated, size=${filesize}
+update_bitstream_b=tftpboot ${kernel_addr_r} ${bitstream_file} && run spi_init && sf erase ${spi_bitstream_b} ${spi_bitstream_max} && sf write ${kernel_addr_r} ${spi_bitstream_b} ${filesize} && setenv bitstream_b_size ${filesize} && saveenv && echo bitstream_b updated, size=${filesize}
+update_image_a=tftpboot ${kernel_addr_r} ${image_file} && run spi_init && sf erase ${spi_image_a} ${spi_image_max} && sf write ${kernel_addr_r} ${spi_image_a} ${filesize} && setenv image_a_size ${filesize} && saveenv && echo image_a updated, size=${filesize}
+update_image_b=tftpboot ${kernel_addr_r} ${image_file} && run spi_init && sf erase ${spi_image_b} ${spi_image_max} && sf write ${kernel_addr_r} ${spi_image_b} ${filesize} && setenv image_b_size ${filesize} && saveenv && echo image_b updated, size=${filesize}
+vendor=xilinx
+
+Environment size: 3705/131068 bytes
+Zynq> 

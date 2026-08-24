@@ -1,0 +1,15 @@
+{
+	"folders": [
+		{
+			"path": "."
+		}
+	],
+	"settings": {
+		"clangd.arguments": [
+			"--background-index",
+			"--compile-commands-dir=${workspaceFolder}",
+			"--header-insertion=never",
+			"--clang-tidy=false"
+		]
+	}
+}

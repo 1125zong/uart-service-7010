@@ -1,0 +1,11 @@
+echo -n "1234567890ABCDEF" | dd of=/dev/mtdblock2 bs=1 seek=4096 count=16
+
+dd if=/dev/mtdblock2 bs=1 skip=4096 count=16 2>/dev/null | hexdump -C
+
+
+setenv read_bootpart 'sf probe; sf read 0x2000000 0x120000 0x10; setexpr.b bootpart *0x200000b; echo "bootpart: 0x${bootpart}" '
+
+
+setenv image_b_size  0xc00000
+
+setenv bootcmd_spi 'run read_bootpart; if test ${bootpart} = 0; then echo "booting from partA"; run bootcmd_spi_a; else echo "booting from partB";run bootcmd_spi_b; fi'

@@ -30,6 +30,7 @@ int init_pl_memory_access(void)
         return 0;  // Both already initialized
     }
     
+    printf("init_pl_memory_access cross\n");
     mem_fd = open("/dev/mem", O_RDWR | O_SYNC);
     if (mem_fd == -1) {
         printf("open failed /dev/mem: %s\n", strerror(errno));
@@ -567,7 +568,9 @@ void UART_LSR_Print(uint8_t channel)
     printf("UART[%d] LSR: 0x%02X\r\n", channel, reg_value);
 }
 
+#define RS422
 
+#ifdef RS422
 
 /* LED control functions */
 void txled(int i, int action)
@@ -578,6 +581,101 @@ void txled(int i, int action)
 	uint32_t value = (action == 1) ? 1 : 0; 
 
 	sysAxiWriteLong((int32_t)pl_led_base_addr + reg_address, value);
+
+
+    sysAxiWriteLong((int32_t)pl_led_base_addr + IIC_REG_OFFSET, 1);
+
+    usleep(3000);
+    sysAxiWriteLong((int32_t)pl_led_base_addr + IIC_REG_OFFSET, 0);
+
+
+}
+
+void rxled(int i, int action)
+{
+	if (i < 0 || i > 15) return;
+
+	uint32_t reg_address = RECEIVE_LED_OFFSET + (i * 4);  
+	uint32_t value = (action == 1) ? 1 : 0;  
+
+	sysAxiWriteLong((int32_t)pl_led_base_addr + reg_address, value);
+
+    sysAxiWriteLong((int32_t)pl_led_base_addr + IIC_REG_OFFSET, 1);
+    usleep(3000);
+    sysAxiWriteLong((int32_t)pl_led_base_addr + IIC_REG_OFFSET, 0);
+}
+
+
+void test_rx_led(void)
+{
+    printf("\ntest_rx_led\n");
+    
+        rxled(1, 1);
+        rxled(2, 1);
+
+        sleep(1);
+        rxled(1, 0);
+        rxled(2, 0);
+
+}
+
+void test_tx_led(void)
+{
+    for(int i = 0; i < 16; i++)
+        txled(i, 1);
+
+}
+
+
+void Portled(int i, int action)
+{
+	if (i < 0 || i > 15) return;
+
+	uint32_t reg_address = LOCKED_LED_OFFSET + (i * 4);  
+	uint32_t value = (action == 1) ? 1 : 0;  
+
+	sysAxiWriteLong((int32_t)pl_led_base_addr + reg_address, value);
+
+    sysAxiWriteLong((int32_t)pl_led_base_addr + IIC_REG_OFFSET, 1);
+    usleep(3000);
+    sysAxiWriteLong((int32_t)pl_led_base_addr + IIC_REG_OFFSET, 0);
+}
+
+
+/* 设备锁定LED control functions 
+*  偏移为:0x270
+*  0: LED off  1: LED on
+*/
+
+void device_locked_led(int action)
+{
+	//uint32_t reg_address = 0x270;  
+	uint32_t value = (action == 1) ? 1 : 0;  
+	sysAxiWriteLong((int32_t)pl_led_base_addr + DEVICE_LOCKED_LED_OFFSET, value);
+
+    //printf("pl_led_base_addr + 0x130: %x\n", (int *)(pl_led_base_addr + 0x130));
+
+    // sysAxiWriteLong(pl_led_base_addr + 0x130, value);
+    // sysAxiWriteLong(pl_led_base_addr + IIC_REG_OFFSET, 1);
+    // sysAxiWriteLong(pl_led_base_addr + IIC_REG_OFFSET, 0);
+}
+
+#else
+
+/* LED control functions */
+void txled(int i, int action)
+{
+	if (i < 0 || i > 15) return;
+
+	uint32_t reg_address = SEND_LED_OFFSET + (i * 4);  
+	uint32_t value = (action == 1) ? 1 : 0; 
+
+	sysAxiWriteLong((int32_t)pl_led_base_addr + reg_address, value);
+
+
+    sysAxiWriteLong((int32_t)pl_led_base_addr + reg_address, value);
+
+
 }
 
 void rxled(int i, int action)
@@ -589,6 +687,8 @@ void rxled(int i, int action)
 
 	sysAxiWriteLong((int32_t)pl_led_base_addr + reg_address, value);
 }
+
+
 
 void Portled(int i, int action)
 {
@@ -613,4 +713,8 @@ void device_locked_led(int action)
 	sysAxiWriteLong((int32_t)pl_led_base_addr + DEVICE_LOCKED_LED_OFFSET, value);
 }
 
+
+
+
+#endif
 

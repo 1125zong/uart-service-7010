@@ -8,6 +8,7 @@
 #include <stdlib.h>      /* 用于 malloc, free */
 #include <string.h>      /* 用于 memcpy, memset */
 #include <unistd.h>      
+#include <sys/stat.h>    /* 用于 chmod */
 #include <pthread.h>
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -46,8 +47,8 @@
 static int serverTaskId = 0;
 static pthread_t server_thread_id = 0;  // POSIX 线程 ID
 
-const char *mtd_dev_bit_b = "/dev/mtd5";  //bitstream_b
-const char *mtd_dev_image_b = "/dev/mtd7";  //image_b
+const char *mtd_dev_image_b = "/dev/mtd5";  //image_b
+const char *mtd_dev_rootfs_b = "/dev/mtd6";  //image_b
 #define TEMP_FILE "/tmp/image.ub"  // 临时文件（写入后自动删除）
 
 /* --- 3. 函数原型 --- */
@@ -60,12 +61,13 @@ static int flashcp_write(const char *src_file, const char *mtd_device) ;
 static int write_mem_to_temp(const void *buf, size_t buf_len, const char *temp_path);
 static int erase_mtd_partition(const char *mtd_device);
 
-/* 【修正】: 函数原型现在需要 header 指针和三个数据指针 */
+/* 【修正】: 函数原型现在需要 header 指针和四个数据指针 */
 STATUS write_firmware_to_flash(
     const fw_package_header_t *header,
     const char *bit_data,
     const char *kernel_data,
-    const char *rootfs_data
+    const char *rootfs_data,
+    const char *app_data
 );
 
 /**
@@ -584,7 +586,7 @@ STATUS process_firmware_package(int client_sock, char *buffer, long size)
 
     /* 3. 【关键】执行 FLASH 擦写 (慢速操作) */
     /* (我们传入 header 指针, 以便 write 函数可以访问大小信息) */
-    if (write_firmware_to_flash(header, bit_data, kernel_data, rootfs_data) != OK)
+    if (write_firmware_to_flash(header, bit_data, kernel_data, rootfs_data, app_data) != OK)
     {
         LOG_INFO("process_pkg: [X] Fatal error: FLASH write failed!\n");
         send_status(client_sock, STATUS_ERROR);
@@ -613,7 +615,8 @@ STATUS write_firmware_to_flash(
     const fw_package_header_t *header,
     const char *bit_data,
     const char *kernel_data,
-    const char *rootfs_data)
+    const char *rootfs_data,
+    const char *app_data)
 {
     char size_str[12]; /* 用于整数到字符串的转换 */
 
@@ -664,7 +667,7 @@ STATUS write_firmware_to_flash(
         }
    
         LOG_INFO("write_flash: writing Bitstream to BitpartitionB...\n");
-        if (flashcp_write(TEMP_FILE, mtd_dev_bit_b) != 0)
+        if (flashcp_write(TEMP_FILE, mtd_dev_image_b) != 0)
         {
             LOG_INFO("write_flash: [SAFE-UPGRADE] Writing Bitstream B failed! bootpart=0 (safe partition).\n");
             return -1;
@@ -711,7 +714,7 @@ STATUS write_firmware_to_flash(
             return -1;
         }    
         LOG_INFO("write_flash: writing rootfs to partitionB...\n");
-        if (flashcp_write(TEMP_FILE, mtd_dev_image_b) != 0)
+        if (flashcp_write(TEMP_FILE, mtd_dev_rootfs_b) != 0)
         {
             LOG_INFO("write_flash: [SAFE-UPGRADE] Writing rootfs to partitionB failed! bootpart=0 (safe partition).\n");
             return -1;
@@ -721,6 +724,29 @@ STATUS write_firmware_to_flash(
     else 
     {
         LOG_INFO("write_flash: rootfs NOT updated, skip writing\n");
+    }
+
+    /* --- 步骤 3: 写入APP到文件系统 (如果需要) --- */
+    if (header->update_flags & UPDATE_FLAG_APP)
+    {
+        LOG_INFO("write_flash: writing %u bytes APP to /tmp/app/app...\n", header->app_length);
+
+        if (write_mem_to_temp(app_data, header->app_length, "/tmp/app/app") != 0)
+        {
+            LOG_ERROR("write_flash: [SAFE-UPGRADE] Write app file failed!\n");
+            return -1;
+        }
+
+        /* 设置可执行权限 */
+        if (chmod("/tmp/app/app", 0755) != 0)
+        {
+            LOG_ERROR("write_flash: [WARNING] chmod app failed!\n");
+        }
+        LOG_INFO("write_flash: APP writing succeed!\n");
+    }
+    else
+    {
+        LOG_INFO("write_flash: APP NOT updated, skip writing\n");
     }
   
     /* --- 步骤 4: 最后设置 bootpart=1 (切换到新分区) --- */

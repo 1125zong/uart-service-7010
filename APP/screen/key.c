@@ -17,6 +17,7 @@
 #include <stdlib.h>
 #include <pthread.h>
 #include <time.h>
+#include <fcntl.h>
 
 // 声明外部函数和变量
 ui_manager_t g_ui_manager;
@@ -24,9 +25,6 @@ app_config_t g_app_data;
 
 static volatile uint8_t last_key_state = KEY_EVENT_NONE;
 
-// 添加用于按键事件同步的互斥锁和条件变量
-// static pthread_mutex_t key_mutex = PTHREAD_MUTEX_INITIALIZER;
-// static pthread_cond_t key_cond = PTHREAD_COND_INITIALIZER;
 
 // 标志变量，用于通知线程退出
 static volatile int key_thread_running = 1;
@@ -40,6 +38,97 @@ void load_app_data(void);
 void timer_start(void);
 void timer_init(void);
 void sysReboot(void);
+
+/**
+ * @brief 从 sysfs 读取 GPIO 电平值
+ * @param gpio_num GPIO 编号
+ * @return 0=低电平(按下), 1=高电平(未按下), -1=读取失败
+ */
+static int gpio_read_value(int gpio_num)
+{
+    char path[64];
+    char buf[4] = {0};
+    int fd, ret;
+
+    snprintf(path, sizeof(path), "/sys/class/gpio/gpio%d/value", gpio_num);
+
+    
+
+    fd = open(path, O_RDONLY);
+    if (fd < 0)
+    {
+        return -1;
+    }
+
+    ret = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+
+    if (ret <= 0)
+    {
+        return -1;
+    }
+
+    return (buf[0] == '0') ? 0 : 1;
+}
+
+/**
+ * @brief 初始化 GPIO（export 并设置方向为输入）
+ * @param gpio_num GPIO 编号
+ * @return 0=成功, -1=失败
+ */
+static int gpio_init_input(int gpio_num)
+{
+    char path[64];
+    char cmd[64];
+    int fd;
+
+    /* export */
+    fd = open("/sys/class/gpio/export", O_WRONLY);
+    if (fd >= 0)
+    {
+        snprintf(cmd, sizeof(cmd), "%d", gpio_num);
+        write(fd, cmd, strlen(cmd));
+        close(fd);
+    }
+
+    /* 设置方向为输入 */
+    snprintf(path, sizeof(path), "/sys/class/gpio/gpio%d/direction", gpio_num);
+    fd = open(path, O_WRONLY);
+    if (fd >= 0)
+    {
+        write(fd, "in", 2);
+        close(fd);
+        return 0;
+    }
+
+    return -1;
+}
+
+/* GPIO 919 对应复位按键 */
+#define RESET_GPIO_NUM  919
+static int reset_gpio_ready = 0;
+
+/**
+ * @brief 读取复位按键状态 (GPIO 919)
+ * @return 0=按下, 1=未按下
+ */
+int read_reset_key(void)
+{
+    if (!reset_gpio_ready)
+    {
+        if (gpio_init_input(RESET_GPIO_NUM) == 0)
+        {
+            reset_gpio_ready = 1;
+        }
+        else
+        {
+            return 1; /* 初始化失败，返回未按下 */
+        }
+    }
+
+    int val = gpio_read_value(RESET_GPIO_NUM);
+    return (val < 0) ? 1 : val;
+}
 
 // ---获得按键值 ---
 key_event_t my_keypad_get_event(void) 
@@ -78,14 +167,28 @@ key_event_t my_keypad_get_event(void)
         pressed_key = KEY_EVENT_CONFIRM;
         
     }
-    
+
+
+#define RS422
+
+#ifdef RS422
+    if (read_reset_key() == 0)
+    {
+        printf("KEY_RESET (GPIO)!\n");
+        pressed_count++;
+        pressed_key = KEY_EVENT_RESET;
+    }
+
+#else
+
     if (KEY_RESET == 0 ) 
 	{
 		printf("KEY_RESET!\n");
 		pressed_count++;
-		pressed_key = KEY_EVENT_RESET;
-		
+		pressed_key = KEY_EVENT_RESET;	
 	}
+
+#endif
     
     //按键去抖和处理单次触发
     if(pressed_key != last_key_state)
@@ -180,7 +283,11 @@ void* KeyProcessTask(void *arg)
             
             // 直接读取 KEY_RESET 硬件状态（绕过状态机）
             // 按键仍被按住则执行重启
+#ifdef RS422
+            if(read_reset_key() == 0)
+#else
             if(KEY_RESET == 0)
+#endif
             {
                 printf("KEY_RESET still pressed after 2s, rebooting...\n");
                 int ret = set_restore_flag();

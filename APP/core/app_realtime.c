@@ -175,7 +175,8 @@ void* RealTimeSchedulerTask(void *arg)
         run_net_send();
 
         /* LED 每 100 个周期执行一次，减少 time() 系统调用 */
-        if (++loop_cnt >= 100) {
+        if (++loop_cnt >= 100) 
+        {
             handle_led_blinking();
             loop_cnt = 0;
         }
@@ -290,7 +291,9 @@ static void handle_led_blinking(void)
         }
 
         // 只在LED状态发生变化时才更新硬件状态
-        if (s_last_rx_led_state[i] != current_rx_led_state) {
+        if (s_last_rx_led_state[i] != current_rx_led_state) 
+        {
+            printf("rxport%d:%d\n", i, current_rx_led_state);
             rxled(i, current_rx_led_state);
             s_last_rx_led_state[i] = current_rx_led_state;
         }
@@ -310,7 +313,9 @@ static void handle_led_blinking(void)
         }
 
         // 只在LED状态发生变化时才更新硬件状态
-        if (s_last_tx_led_state[i] != current_tx_led_state) {
+        if (s_last_tx_led_state[i] != current_tx_led_state) 
+        {
+            printf("txport%d:%d\n", i, current_tx_led_state);
             txled(i, current_tx_led_state);
             s_last_tx_led_state[i] = current_tx_led_state;
         }

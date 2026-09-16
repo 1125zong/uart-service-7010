@@ -53,6 +53,10 @@ typedef enum{
 #define WDT_FEED_REG_OFFSET 				(0x278)
 
 
+//看门狗喂狗寄存器偏移
+#define IIC_REG_OFFSET 				(0x280)
+
+
 
 
 

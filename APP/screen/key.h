@@ -25,5 +25,6 @@ typedef enum {
 //key_event_t my_keypad_get_event(void);
 void *KeyProcessTask(void *arg);
 void stop_key_process_task(void);
+int read_reset_key(void);
 
 #endif // !__KEY_H

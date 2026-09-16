@@ -17,8 +17,8 @@
 #define UPDATE_FLAG_BITSTREAM       0x01  // bit0: 更新 Bitstream
 #define UPDATE_FLAG_OS              0x02  // bit1: 更新 OS
 #define UPDATE_FLAG_APP             0x04  // bit2: 更新 App
-#define UPDATE_FLAG_KERNEL          0x08  // bit2: 更新 App
-#define UPDATE_FLAG_ROOTFS          0x10  // bit2: 更新 App
+#define UPDATE_FLAG_KERNEL          0x08  // bit2: 更新 内核
+#define UPDATE_FLAG_ROOTFS          0x10  // bit2: 更新 文件系统
 
 /**
  * @brief 固件包文件头结构体 (256 字节)
@@ -87,14 +87,6 @@ typedef struct __attribute__((packed)) {
 
 } fw_package_header_t;
 
-/**
- * @brief 检查 Header 结构体大小是否正确
- *
- * (这是一个编译时断言，如果大小不匹配，编译会失败)
- */
-// typedef int static_assert_header_size_check[
-//     (sizeof(fw_package_header_t) == FW_PACKAGE_HEADER_SIZE) ? 1 : -1
-// ];
 
 
 #endif // FIRMWARE_HEADER_H

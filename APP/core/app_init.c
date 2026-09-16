@@ -94,6 +94,11 @@ void app_start(void)
     /* 根据Flash配置自动初始化看门狗 */
     watchdog_init_from_config();
 
+
+
+    extern void test_rx_led(void);
+    test_rx_led();
+
     // void test_init(void);
     // test_init();  
     // void test_uart(void);

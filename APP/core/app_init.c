@@ -87,7 +87,26 @@ void app_start(void)
 
     //echo_fw_config();
     //mount_jffs2();
-	dev_config_init();
+	ret = dev_config_init();
+
+    /* 配置加载成功后，将RX/TX镜像端口恢复到FPGA */
+    if (ret == OK)
+    {
+        if (port_mirror_apply(g_system_config.mirror_rx_port, 0x00) != OK)
+        {
+            LOG_ERROR("Failed to restore RX mirror port %u\n", (unsigned int)g_system_config.mirror_rx_port);
+        }
+
+        if (port_mirror_apply(g_system_config.mirror_tx_port, 0x01) != OK)
+        {
+            LOG_ERROR("Failed to restore TX mirror port %u\n", (unsigned int)g_system_config.mirror_tx_port);
+        }
+    }
+    else
+    {
+        LOG_ERROR("Failed to initialize device configuration\n");
+    }
+
 	dev_config_dump_all();
 	init_channel_states();
     
@@ -96,13 +115,14 @@ void app_start(void)
 
 
 
-    extern void test_rx_led(void);
-    test_rx_led();
+    // extern void test_rx_led(void);
+    // test_rx_led();
 
-    // void test_init(void);
+    // extern void test_init(void);
     // test_init();  
-    // void test_uart(void);
+    // extern void test_uart(void);
     // test_uart();
+
 
 #if 1
     ret = create_application_tasks();

@@ -296,8 +296,45 @@ void handle_port_lock(int client_fd, unsigned char *data, int len)
         //更新该通道的锁定状态
         update_channel_lock_status(port_index, INTERFACE_LOCK_STATE_LOCKED);
 
+        /* 记录锁定客户端的IP地址 */
+        g_system_config.channels[port_index].locked_client_ip[0] = client_ip;
+
         /* 记录锁定的客户端的mac地址 */
         memcpy(g_system_config.channels[port_index].locked_client_mac, client_mac, 6);
+
+        // 断开该端口中属于其他PC的已有数据连接
+        ChannelState *channel = &g_system_config.channels[port_index];
+        for (int j = 0; j < channel->data_net_info.num_clients; j++)
+        {
+            int fd = channel->data_net_info.client_fds[j];
+            struct sockaddr_in peer_addr;
+            socklen_t peer_len = sizeof(peer_addr);
+
+            if (fd < 0)
+            {
+                continue;
+            }
+
+            memset(&peer_addr, 0, sizeof(peer_addr));
+
+            if (getpeername(fd, (struct sockaddr *)&peer_addr, &peer_len) == 0)
+            {
+                if (peer_addr.sin_addr.s_addr != client_ip)
+                {
+                    LOG_INFO("Disconnect unauthorized client %s "
+                     "from port %d\n",
+                     inet_ntoa(peer_addr.sin_addr),
+                     port_index + 1);
+                    
+                    /* 
+                    * 网络调度线程稍后会检测到连接断开 
+                    * 并调用cleanup_data_connection() 清理数组
+                    */ 
+                    shutdown(fd, SHUT_RDWR);
+                }
+            }
+            
+        }
 
         /* 点亮端口对应的LED灯 */
         Portled(port_index, 1);
@@ -431,12 +468,19 @@ void handle_port_unlock(int client_fd, unsigned char *data, int len)
 
     for (i = 0; i < port_cnt; i++)
     {
+        if (data[5 + i] < 1 || data[5 + i] > NUM_PORTS)
+        {
+            LOG_ERROR("ERROR: Invalid port number: %u\n", (unsigned int)data[5 + i]);
+            unlock_success = 0;
+            continue;
+        }
+
         port_index = data[5 + i] - 1;
 
         //首先检查该端口是否被锁定，如果未被锁定则返回错误
         if (is_port_locked(port_index) != INTERFACE_LOCK_STATE_LOCKED)
         {
-            LOG_ERROR("  ERROR: Port %d is not locked\n", port_index);
+            LOG_ERROR("  ERROR: Port %d is not locked\n", port_index + 1);
             unlock_success = 0;
             continue;
         }
@@ -449,6 +493,14 @@ void handle_port_unlock(int client_fd, unsigned char *data, int len)
             continue;
         }
 
+        /*
+        * 身份验证成功后，清除该端口原来记录的锁定者信息。
+        * 这些操作仍处于g_config_mutex保护范围内。
+        */
+        g_system_config.channels[port_index].locked_client_ip[0] = 0;
+
+        memset(g_system_config.channels[port_index].locked_client_mac, 0, sizeof(g_system_config.channels[port_index].locked_client_mac));
+
         // 更新端口锁定状态为未锁定
         g_system_config.device.interface_lock_status[port_index] = INTERFACE_LOCK_STATE_UNLOCK;
         update_channel_lock_status(port_index, INTERFACE_LOCK_STATE_UNLOCK);
@@ -456,7 +508,7 @@ void handle_port_unlock(int client_fd, unsigned char *data, int len)
         /* 熄灭端口对应的LED灯 */
         Portled(port_index, 0);
 
-        LOG_INFO("  Port %d unlocked successfully\n", port_index);
+        LOG_INFO("  Port %d unlocked successfully\n", port_index + 1);
     }
 
     // 释放配置锁
@@ -569,55 +621,77 @@ void handle_port_lock_query(int client_fd, unsigned char *data, int len)
 
 void handle_port_mirror_config(int client_fd, unsigned char *data, int len)
 {
-    unsigned char sub_id  = data[3];  
-    unsigned char main_id = data[2];  
-    
-    LOG_INFO("  Action: Port Mirror Config, SubID=0x05\n");
+    uint8_t main_id;
+    uint8_t sub_id;
+    uint8_t port;
+    uint8_t direction;
+    uint8_t saved_rx;
+    uint8_t saved_tx;
 
-    if(len < 7)
+    if (len < 4)
     {
-        LOG_ERROR("  ERROR: Invalid data length: %d\n", len);
+        return;
+    }
+
+    main_id = data[2];
+    sub_id  = data[3];
+
+    if (len != 8)
+    {
         send_report_response(client_fd, main_id, sub_id, FAILED);
         return;
     }
-    
-    //设备被锁定，直接返回
-    if (is_device_locked())        
+
+    if (is_device_locked())
     {
-        LOG_ERROR("  ERROR: Device is locked, cannot configure port mirror\n");
         send_report_response(client_fd, main_id, sub_id, FAILED);
         return;
     }
-    
-    /* 解析参数 */
-    unsigned char port_number = data[4];  /* 端口号: 1~NUM_PORTS */
-    unsigned char enable = data[5];      /* 使能: 01=启用, 00=禁用 */
-    
-    /* 校验端口号: 1 ~ NUM_PORTS */
-    if (port_number < 1 || port_number > NUM_PORTS)
+
+    port = data[4];
+    direction = data[5];
+
+    if (port < 1 || port > NUM_PORTS || (direction != 0x00 && direction != 0x01))
     {
-        LOG_ERROR("  ERROR: Invalid port number %d\n", port_number);
         send_report_response(client_fd, main_id, sub_id, FAILED);
         return;
     }
-    
-    /* 校验使能值 */
-    if (enable > 1)
+
+    if (semTake(g_config_mutex, WAIT_FOREVER) != OK)
     {
-        LOG_ERROR("  ERROR: Invalid enable value %d\n", enable);
         send_report_response(client_fd, main_id, sub_id, FAILED);
         return;
     }
-    
-    int ch_idx = port_number - 1;
-    
-    semTake(g_config_mutex, WAIT_FOREVER);
-    g_system_config.channels[ch_idx].mirror_enable = enable;
+
+    if (port_mirror_apply(port, direction) != OK)
+    {
+        semGive(g_config_mutex);
+        LOG_ERROR("Failed to apply port mirror: port=%u, direction=%u\n", (unsigned int)port, (unsigned int)direction);
+        send_report_response(client_fd, main_id, sub_id, FAILED);
+
+        return;
+    }
+
+    // 查询镜像端口
+    if (direction == 0x00)
+    {
+        g_system_config.mirror_rx_port = port;
+    }
+    else
+    {
+        g_system_config.mirror_tx_port = port;
+    }
+
+    saved_rx = g_system_config.mirror_rx_port;
+    saved_tx = g_system_config.mirror_tx_port;
+
     semGive(g_config_mutex);
-    
-    LOG_INFO("  Port %d mirror %s\n", port_number, enable ? "enabled" : "disabled");
-    
-    // 发送确认响应
+
+    LOG_INFO("Port mirror applied: RX port=%u, TX port=%u; "
+         "runtime only, reset to port 16 after reboot\n",
+         (unsigned int)saved_rx,
+         (unsigned int)saved_tx);
+
     send_report_response(client_fd, main_id, sub_id, SUCCESSED);
 }
 

@@ -38,7 +38,7 @@
 #define DEVICE_SERIAL_NO_YEAR        (0x07E9)  //2025
 #define DEVICE_SERIAL_NO_MONTH       (0x05)
 #define DEVICE_SERIAL_NO_DAY         (0x01)
-#define DEVICE_NUMBER                (0x000001)    
+#define DEVICE_NUMBER                (0x000003)    
 
 //固件版本
 #define FW_VERSION_MAJOR             (0x01)        
@@ -462,6 +462,16 @@ typedef struct
     unsigned int rx_net;
     unsigned long long tx_total_count;
     unsigned long long rx_total_count;
+    // 可删除
+    
+unsigned long long tcp_send_requested_bytes;
+unsigned long long tcp_send_actual_bytes;
+unsigned long long tcp_short_write_count;
+unsigned long long tcp_unsent_bytes;
+unsigned long long tcp_send_eagain_count;
+unsigned long long tcp_send_error_count;
+    /**/
+
 
     /* -- 串口错误统计 -- */
     unsigned int frame_error_count;    /* 帧错误计数 */
@@ -496,7 +506,12 @@ typedef struct
 {
 	DeviceSettings device;
 	ChannelState channels[NUM_PORTS];
+
+    /* 全局端口镜像配置，保存上位机端口号 1 ~ 16 */
+    unsigned char mirror_rx_port;
+    unsigned char mirror_tx_port;
 } SystemConfiguration;
+
 
 /* ------------------ Global Variable Declaration (extern) ------------------ */
 

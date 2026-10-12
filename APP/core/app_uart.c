@@ -180,9 +180,7 @@ int init_usart(ChannelState *uart_instance, int client_socket, char *buf, int bu
 	uart_instance->usart_crtscts = (unsigned char) buf[6];
 
 	calculate_send_parameters(uart_instance);
-
-
-	//axi16550TypeSet(UART_MODE_RS422, channel);
+	// axi16550TypeSet(UART_MODE_RS422, channel);
 
 	//打包数据
 	pack_buf[0] = buf[0];

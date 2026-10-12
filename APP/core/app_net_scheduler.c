@@ -11,6 +11,8 @@
  */
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #include <time.h>
 #include "app_com.h"
 
@@ -24,6 +26,8 @@ void run_net_recv(void);
 void run_net_send(void);
 static void cleanup_data_connection(int channel_index,int client_index_in_array);
 
+static int is_locked_port_client_allowed(int channel_index, int client_fd);
+extern int g_active_tcp_connections[NUM_PORTS];
 
 ///////////////////////////////////////////
 extern struct timespec start, end, diff; // 声明时间变量
@@ -94,6 +98,34 @@ void check_for_new_connections(void)
             }
 
             ChannelState* channel = &g_system_config.channels[i];
+
+            /* 端口锁定时，只允许锁定该端口的PC建立数据连接 */
+            if ((msg.type == CONN_TYPE_REALCOM_DATA || msg.type == CONN_TYPE_TCPSERVER) && !is_locked_port_client_allowed(i, msg.client_fd))
+            {
+                struct sockaddr_in peer_addr;
+                socklen_t peer_len = sizeof(peer_addr);
+
+                memset(&peer_addr, 0, sizeof(peer_addr));
+
+                if (getpeername(msg.client_fd, (struct sockaddr *)&peer_addr, &peer_len) == 0)
+                {
+                    LOG_WARN("Reject client %s: port %d is locked by another PC\n", inet_ntoa(peer_addr.sin_addr), i + 1);
+                }
+                else
+                {
+                    LOG_WARN("Reject client: port %d is locked by another PC\n", i + 1);
+                }
+
+                shutdown(msg.client_fd, SHUT_RDWR);
+                close(msg.client_fd);
+
+                if (g_active_tcp_connections[i] > 0)
+                {
+                    g_active_tcp_connections[i]--;
+                }
+                continue;
+            } 
+
 
             // 2. 根据连接类型，选择正确的 NetInfo 结构体来存放 fd
             switch (msg.type)
@@ -170,7 +202,6 @@ unsigned char temp_buffer_net_rx[TX_NET_SIZE];
 
 void run_net_recv(void) 
 {
-
     int i, j;
     fd_set readfds; // 用于 select 的可读文件描述符集合
     int max_fd = 0;
@@ -237,6 +268,14 @@ void run_net_recv(void)
                     //clock_gettime(CLOCK_MONOTONIC, &t_loopback_start);
                     // 成功读取数据
                     channel->tx_net += n;
+
+
+
+                    /******    临时添加    *****/
+                    LOG_DEBUG("[NET RX] Port=%d, len=%d, data=%02X\n", i + 1, n, (unsigned char)temp_buffer_net_rx[0]);
+                    /****/
+
+
                     //LOG_DEBUG("Data: NetScheduler: Ch %d received %d bytes on fd %d.\n", i, n, fd);
                     //printf("Data: NetScheduler: Ch %d received %d bytes on fd %d.\n", i, n, fd);
                     // 打印接收到的网络数据
@@ -360,14 +399,50 @@ void run_net_send(void)
                 if (fd >= 0 && FD_ISSET(fd, &writefds))
                 {
                     int sent = send(fd, (char*)temp_buffer_net_tx, bytes_to_send, 0);
-                    if (sent > 0)
-                    {
+                    // 可删除
+channel->tcp_send_requested_bytes += bytes_to_send;
+
+if (sent > 0)
+{
+    channel->tcp_send_actual_bytes +=
+        (unsigned int)sent;
+
+    if ((unsigned int)sent < bytes_to_send)
+    {
+        channel->tcp_short_write_count++;
+
+        channel->tcp_unsent_bytes +=
+            bytes_to_send - (unsigned int)sent;
+    }
+}
+else if (sent == 0)
+{
+    channel->tcp_short_write_count++;
+    channel->tcp_unsent_bytes += bytes_to_send;
+}
+else
+{
+    channel->tcp_unsent_bytes += bytes_to_send;
+
+    if (errno == EWOULDBLOCK ||
+        errno == EAGAIN)
+    {
+        channel->tcp_send_eagain_count++;
+    }
+    else
+    {
+        channel->tcp_send_error_count++;
+    }
+}
+/*** */
+                    // if (sent > 0)
+                    // {
                         // 环回测试：计算并打印延迟
                         //clock_gettime(CLOCK_MONOTONIC, &t_loopback_end);
                         //struct timespec diff = diff_timespec(t_loopback_start, t_loopback_end);
                         //unsigned long us = diff.tv_sec * 1000000 + diff.tv_nsec / 1000;
                         //printf("==== loopback delay: %ld us ====\n", us);
-                    }
+                    // }
                     if (sent < 0) 
                     {
                         if (errno != EWOULDBLOCK && errno != EAGAIN)
@@ -423,8 +498,14 @@ static void cleanup_data_connection(int channel_index, int client_index_in_array
 		// channel->rx_net = 0;
 		// channel->rx_count = 0;
 		// channel->tx_count = 0;
-		ring_buffer_init(&channel->buffer_net,  channel->net_buffer_mem,  RING_BUFFER_SIZE);
-		ring_buffer_init(&channel->buffer_uart, channel->uart_buffer_mem, RING_BUFFER_SIZE);
+        
+        // 可删除---删除前记得解开下面两行代码的注释
+		// ring_buffer_init(&channel->buffer_net,  channel->net_buffer_mem,  RING_BUFFER_SIZE);
+		// ring_buffer_init(&channel->buffer_uart, channel->uart_buffer_mem, RING_BUFFER_SIZE);
+        ring_buffer_reset(&channel->buffer_net);
+        ring_buffer_reset(&channel->buffer_uart);
+        /**/
+
 		/* 检查命令通道是否也无连接 */
 		if (channel->cmd_net_info.num_clients == 0) {
 			channel->is_connected = PORT_CONNECT_NONE;
@@ -459,4 +540,41 @@ void NetSchedulerTestTask_Entry(void)
         //taskDelay(sysClkRateGet()/800); // 大约每 1.25ms 执行一次
         taskDelay(1); // 大约每 1.25ms 执行一次
     }
+}
+
+
+static int is_locked_port_client_allowed(int channel_index, int client_fd)
+{
+    struct sockaddr_in peer_addr;
+    socklen_t peer_len = sizeof(peer_addr);
+    unsigned int owner_ip;
+    unsigned char locked;
+
+    if (channel_index < 0 || channel_index >= NUM_PORTS)
+    {
+        return 0;
+    }
+
+    if (semTake(g_config_mutex, WAIT_FOREVER) != OK)
+    {
+        return 0;
+    }
+
+    locked = g_system_config.device.interface_lock_status[channel_index];
+    owner_ip = g_system_config.channels[channel_index].locked_client_ip[0];
+
+    semGive(g_config_mutex);
+
+    if (locked != INTERFACE_LOCK_STATE_LOCKED)
+    {
+        return 1;
+    }
+    memset(&peer_addr, 0, sizeof(peer_addr));
+
+    if (getpeername(client_fd, (struct sockaddr *)&peer_addr, &peer_len) != 0)
+    {
+        return 0;
+    }
+
+    return peer_addr.sin_addr.s_addr == owner_ip;
 }

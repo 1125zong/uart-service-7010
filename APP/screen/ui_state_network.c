@@ -487,10 +487,10 @@ static void network_handle_input(ui_manager_t* manager, key_event_t event)
                             strcpy(lan->gateway, edit_buffer);
 
                         //打印ip
-                        printf("ip:%s\n",lan->ip_address);
-                        printf("mask:%s\n",lan->network_mask);
-                        printf("gateway:%s\n",lan->gateway);
-                        printf("current_lan_port:%d\n", current_lan_port);
+                        // printf("ip:%s\n",lan->ip_address);
+                        // printf("mask:%s\n",lan->network_mask);
+                        // printf("gateway:%s\n",lan->gateway);
+                        // printf("current_lan_port:%d\n", current_lan_port);
 
                         
                         sync_ui_config_to_global(current_lan_port, lan);

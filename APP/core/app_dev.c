@@ -120,6 +120,9 @@ typedef struct
 	uint32_t magic_num;                  
     DeviceSettings device;
     ChannelConfig channels[NUM_PORTS];
+
+	unsigned char mirror_rx_port;
+	unsigned char mirror_tx_port;
 } SystemConfigForFlash;
 
 
@@ -362,6 +365,8 @@ static int read_config_from_flash(SystemConfiguration* config)
 {
 	int ret;
 	SystemConfigForFlash flash_config;
+	memset(&flash_config, 0, sizeof(flash_config));
+
 	int i;
 	//LOG_INFO("sizeof(SystemConfigForFlash): 0x%x\n", sizeof(SystemConfigForFlash));
 	LOG_INFO("sizeof(flash_config.channels): 0x%x\n", sizeof(flash_config.channels));
@@ -389,8 +394,21 @@ static int read_config_from_flash(SystemConfiguration* config)
 	memcpy(&config->device, &flash_config.device, sizeof(DeviceSettings));
 	
 	// 复制每个通道的配置，同时保持运行时缓冲区不变
-	for (i = 0; i < NUM_PORTS; i++) {
+	for (i = 0; i < NUM_PORTS; i++) 
+	{
 		copy_channel_config_from_flash(&flash_config.channels[i], &config->channels[i]);
+	}
+
+	config->mirror_rx_port = 16;
+	config->mirror_tx_port = 16;
+	if (config->mirror_rx_port < 1 || config->mirror_rx_port > NUM_PORTS)
+	{
+		config->mirror_rx_port = 16;
+	}
+
+	if (config->mirror_tx_port < 1 || config->mirror_tx_port > NUM_PORTS)
+	{
+		config->mirror_tx_port = 16;
 	}
 	
 	//dev_config_printf(&g_system_config);
@@ -404,6 +422,7 @@ static int write_config_to_flash(const SystemConfiguration* config)
 {
 	SystemConfigForFlash flash_config;
 	int i;
+	int ret;
 	LOG_INFO("Writing configuration to flash...\n");
 	
 	// 将完整配置结构体转换为精简结构体
@@ -416,8 +435,17 @@ static int write_config_to_flash(const SystemConfiguration* config)
 		copy_channel_config_to_flash(&config->channels[i], &flash_config.channels[i]);
 	}
 	
+	// 将镜像端口写入 flash 中
+	flash_config.mirror_rx_port = 16;
+	flash_config.mirror_tx_port = 16;
+
 	// 写入精简配置结构体到Flash
-	hal_flash_write(FLASH_START_ADDR, (const char*)&flash_config, sizeof(SystemConfigForFlash));
+	ret = hal_flash_write(FLASH_START_ADDR, (const char*)&flash_config, sizeof(SystemConfigForFlash));
+	if (ret != FLASH_SUCCESS)
+	{
+    	LOG_ERROR("Failed to write configuration to flash: %d\n", ret);
+    	return ERROR;
+	}
 		
 	LOG_INFO("Configuration successfully written to flash\n");
 	return OK;
@@ -628,6 +656,10 @@ void dev_config_load_defaults(void)
 		strcpy(dev->lock_password, "NULL");
 
 		dev->locked_client_ip = 0; // 初始化锁定客户端IP为0，表示没有锁定设备
+
+		// 默认镜像端口号(TX和RX通道)为 16
+		g_system_config.mirror_rx_port = 16;
+		g_system_config.mirror_tx_port = 16;
 	
 		semGive(g_config_mutex);
 	} 

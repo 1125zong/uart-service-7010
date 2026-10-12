@@ -251,6 +251,17 @@ void axi16550BaudInit(unsigned int channel, unsigned int baud)
     unsigned short dlm, dll;
     unsigned char reg;
     div = AXI_16550_CLK / 16 / baud;
+
+    /*------- 临时添加 --------*/
+    // printf("axi16550BaudInit UART channel=%u, clk=%u, baud=%u, div=%u, DLM=0x%02X, DLL=0x%02X\n",
+    //    channel,
+    //    AXI_16550_CLK,
+    //    baud,
+    //    div,
+    //    (div >> 8) & 0xFF,
+    //    div & 0xFF);
+    /*******************/
+    
     dlm = (div >> 8) & 0xFF;
     dll = div & 0xFF;
     reg = userAxiCfgRead(channel, AXI_16550_LCR);
@@ -309,7 +320,35 @@ uint8_t axi16550TypeSet(UART_TYPE uart_type, unsigned int channel)
     return 1;
 }
 
+// 写FPGA 
+int port_mirror_apply(unsigned char port, unsigned char direction)
+{
+    int32_t reg_addr;
+    unsigned char fpga_port;
 
+    if (port < 1 || port > 16 || direction > 1)
+    {
+        return ERROR;
+    }
+    
+    if (pl_led_base_addr == MAP_FAILED)
+    {
+        return ERROR;
+    }
+
+    fpga_port = 16 - port;
+    if (direction == 0x00)
+    {
+        reg_addr = (int32_t)pl_led_base_addr + PORT_MIRROR_RX_OFFSET;
+    }
+    else
+    {
+        reg_addr = (int32_t)pl_led_base_addr + PORT_MIRROR_TX_OFFSET;
+    }
+
+    sysAxiWriteLong(reg_addr, fpga_port);
+    return OK;
+}
 
 
 void axi16550CheckSelfInit(unsigned int channel, unsigned int baud)
@@ -330,7 +369,7 @@ void axi16550CheckSelfInit(unsigned int channel, unsigned int baud)
     // FCR[7:6] = 11b = 0xC0: FIFO trigger level = 14 bytes
     userAxiCfgWrite(channel, AXI_16550_FCR, 0x87);
     userAxiCfgWrite(channel, AXI_16550_FCR, 0xC1);  // 触发等级设为14字节
-    userAxiCfgWrite(channel, AXI_16550_MCR, 0x10); /* Normal mode:(bit 4 = 0) loopback mode:(bit 4 = 1)*/
+    userAxiCfgWrite(channel, AXI_16550_MCR, 0x10);  /* Normal mode:(bit 4 = 0)   loopback mode:(bit 4 = 1)*/
     userAxiCfgWrite(channel, AXI_16550_IER, 0x00);
 }
 
@@ -364,6 +403,18 @@ void axi165502CInit(usart_info_t *uart_instance, int channel)
     }
 
     div = AXI_16550_CLK / 16 / uart_instance->baud_rate;
+
+    /*------- 临时添加 --------*/
+    // printf("axi165502CInit UART channel=%d, clk=%u, baud=%u, "
+    //    "div=%u, DLM=0x%02X, DLL=0x%02X\n",
+    //    channel,
+    //    (unsigned int)AXI_16550_CLK,
+    //    uart_instance->baud_rate,
+    //    div,
+    //    (div >> 8) & 0xFF,
+    //    div & 0xFF);
+    /*******************/
+
     dlm = (div >> 8) & 0xFF;
     dll = div & 0xFF;
 
@@ -373,7 +424,7 @@ void axi165502CInit(usart_info_t *uart_instance, int channel)
     userAxiCfgWrite(channel, AXI_16550_DLL, dll);
     userAxiCfgWrite(channel, AXI_16550_LCR, reg & 0x7F);
     userAxiCfgWrite(channel, AXI_16550_LCR, reg | lcr);
-    userAxiCfgWrite(channel, AXI_16550_MCR, 0x10); /* Normal mode, loopback disabled (bit 4 = 0) */
+    userAxiCfgWrite(channel, AXI_16550_MCR, 0x00); /* Normal mode, loopback disabled (bit 4 = 0) 10 00*/
     userAxiCfgWrite(channel, AXI_16550_IER, 0x00);
     
     axi16550FIFOInit(channel);
@@ -403,15 +454,25 @@ void test_uart(void)
      /*
       *  先发送再接收
      */
-    char send_buffer[1] = {0x55};
+    char send_buffer[1] = {0x88};
     char recv_buffer[128] = {0};
     uint32_t size; 
     while(1)
     {
-        axi16550Send(15, send_buffer, 1); /* Send "Hello world" */
-        axi16550Recv(15, recv_buffer, &size);
-        printf("size=%d\n", size);
-        printf("recv_data: 0x%x\n", recv_buffer[0]);
+        // axi16550Send(14, send_buffer, 1); /* Send "Hello world" */
+
+        // printf("size=%d\n", size);
+
+        printf("send_data: 0x%x\n", send_buffer[0]);
+        axi16550Send(15, send_buffer, 1);
+        
+
+        // axi16550Recv(0, (uint8_t *)recv_buffer, &size,
+        //              NULL, NULL, NULL, NULL);
+        // printf("recv_data: 0x%x\n", recv_buffer[0]);
+        // recv_buffer[0] = 0;
+
+
         usleep(1000000);
     }
 }
@@ -717,4 +778,3 @@ void device_locked_led(int action)
 
 
 #endif
-

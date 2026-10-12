@@ -99,6 +99,12 @@ void handle_read_serial_port_settings(int client_fd, unsigned char *data, int le
         semGive(g_config_mutex);
     }
 
+    semTake(g_config_mutex, WAIT_FOREVER);
+
+    response[offset++] = g_system_config.mirror_rx_port;
+    response[offset++] = g_system_config.mirror_tx_port;
+
+    semGive(g_config_mutex);
 
     response[offset++] = 0x5A; response[offset++] = 0x5A;
     send(client_fd, (char*)response, offset, 0);

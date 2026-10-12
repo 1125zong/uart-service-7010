@@ -138,7 +138,7 @@ static void restart_handle_input(ui_manager_t* manager, key_event_t event)
                     LOG_ERROR("ERROR[reboot]: Failed to save configuration to flash.\n");
                 }
                 
-                printf("RESTART: Rebooting system now...\n");
+                // printf("RESTART: Rebooting system now...\n");
                 sleep(2); // 模拟 2 秒重启
 				sysReboot();
             

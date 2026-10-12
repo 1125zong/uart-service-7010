@@ -139,14 +139,14 @@ key_event_t my_keypad_get_event(void)
     // 检查各个按键状态，0表示按下，1表示未按下
     if (KEY_MENU_ADDR == 0) 
     {
-    	printf("KEY_MENU_ADDR!\n");   	   	
+	    	// printf("KEY_MENU_ADDR!\n");   	   	
         pressed_count++;           
 		pressed_key = KEY_EVENT_MENU;     
     }
     
     if (KEY_UP_ADDR == 0 ) 
     {
-    	printf("KEY_UP_ADDR!\n");
+	    	// printf("KEY_UP_ADDR!\n");
         pressed_count++;
         pressed_key = KEY_EVENT_UP;
         
@@ -154,7 +154,7 @@ key_event_t my_keypad_get_event(void)
     
     if (KEY_DOWN_ADDR == 0 ) 
     {
-    	printf("KEY_DOWN_ADDR!\n");
+	    	// printf("KEY_DOWN_ADDR!\n");
         pressed_count++;
         pressed_key = KEY_EVENT_DOWN;
         
@@ -162,7 +162,7 @@ key_event_t my_keypad_get_event(void)
     
     if (KEY_CONFIRM_ADDR == 0 ) 
     {
-    	printf("KEY_CONFIRM_ADDR!\n");
+	    	// printf("KEY_CONFIRM_ADDR!\n");
         pressed_count++;
         pressed_key = KEY_EVENT_CONFIRM;
         
@@ -174,7 +174,7 @@ key_event_t my_keypad_get_event(void)
 #ifdef RS422
     if (read_reset_key() == 0)
     {
-        printf("KEY_RESET (GPIO)!\n");
+        // printf("KEY_RESET (GPIO)!\n");
         pressed_count++;
         pressed_key = KEY_EVENT_RESET;
     }
@@ -183,7 +183,7 @@ key_event_t my_keypad_get_event(void)
 
     if (KEY_RESET == 0 ) 
 	{
-		printf("KEY_RESET!\n");
+			// printf("KEY_RESET!\n");
 		pressed_count++;
 		pressed_key = KEY_EVENT_RESET;	
 	}
@@ -271,12 +271,12 @@ void* KeyProcessTask(void *arg)
         // 如果有按键事件，传递给UI系统
         if (event != KEY_EVENT_NONE) 
         {
-            printf("event: %d   last_key_state: %d\n", event, last_key_state);
+            // printf("event: %d   last_key_state: %d\n", event, last_key_state);
             ui_handle_input(&g_ui_manager, event);
         }
         if(event == KEY_EVENT_RESET)
         {
-            printf("event == KEY_EVENT_RESET!\n");
+            // printf("event == KEY_EVENT_RESET!\n");
             
             // 等待2秒后重新检测按键状态
             usleep(1000 * 2000);
@@ -289,7 +289,7 @@ void* KeyProcessTask(void *arg)
             if(KEY_RESET == 0)
 #endif
             {
-                printf("KEY_RESET still pressed after 2s, rebooting...\n");
+                // printf("KEY_RESET still pressed after 2s, rebooting...\n");
                 int ret = set_restore_flag();
                 if (ret < 0) 
                 {
@@ -300,7 +300,7 @@ void* KeyProcessTask(void *arg)
             }
             else
             {
-                printf("KEY_RESET released, no reboot\n");
+                // printf("KEY_RESET released, no reboot\n");
             }
         }
         
@@ -316,7 +316,7 @@ void* KeyProcessTask(void *arg)
 // 3. 填充您的应用数据 (示例)
 void load_app_data(void)
 {
-    printf("MAIN: App data loaded.\n");
+    // printf("MAIN: App data loaded.\n");
     
 
     LOG_INFO("Model Name: %s", g_system_config.device.model_name);
@@ -331,7 +331,7 @@ void load_app_data(void)
     g_app_data.current_status = current_status; // e.g., Start in Lock state
     g_app_data.error_code = 1; // 仅在 STATUS_ERROR 时显示
 
-    printf("[current_status]: %d\n", current_status);
+    // printf("[current_status]: %d\n", current_status);
     
     // [Device Info]
     snprintf(g_app_data.firmware_version, sizeof(g_app_data.firmware_version), "V%d.%d.%d.%d", 
@@ -412,7 +412,7 @@ void sysReboot(void)
     // 等待一段时间让sync完成
     sleep(1);
     // 执行系统重启
-    printf("reboot...\n");
+    // printf("reboot...\n");
     reboot(RB_AUTOBOOT);
 
 }

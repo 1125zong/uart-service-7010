@@ -27,6 +27,7 @@ static int g_serial_fd = -1;
 /**
  * @brief [新] 辅助函数：打印十六进制调试信息
  */
+#if 0
 static void print_hex_dump(const char* prefix, const uint8_t* data, uint16_t length) {
     // 确保 length 是 unsigned，以便与 i 比较
     printf("DRIVER: %s (%u bytes): ", prefix, (unsigned int)length);
@@ -35,6 +36,7 @@ static void print_hex_dump(const char* prefix, const uint8_t* data, uint16_t len
     }
     printf("\n");
 }
+#endif
 
 #if 1
 /**
@@ -98,7 +100,7 @@ static void platform_uart_send(uint8_t* data, uint16_t length)
 {
     
     // 在发送前打印完整的十六进制数据包
-    print_hex_dump("TX", data, length);
+    // print_hex_dump("TX", data, length);
 
     sysUartSend(0 ,  data  ,  length);
 }
@@ -107,7 +109,7 @@ static void platform_uart_send(uint8_t* data, uint16_t length)
 static void platform_uart_send(const uint8_t* data, uint16_t length) {
     
     // 在发送前打印完整的十六进制数据包
-    print_hex_dump("TX", data, length);
+    // print_hex_dump("TX", data, length);
 
     if (g_serial_fd < 0) {
         printf("DRIVER: (UART NOT OPEN) SEND %d bytes\n", length);
@@ -213,7 +215,7 @@ static void my_screen_init(void) {
     my_screen_clear();
     my_screen_rotate();
 
-    printf("DRIVER: Screen Initialized (using custom protocol).\n");
+    // printf("DRIVER: Screen Initialized (using custom protocol).\n");
 }
 
 /**
@@ -240,7 +242,7 @@ static void my_screen_draw_text(uint8_t x, uint8_t y, const char* str) {
     }
     // 发送格式化后的文本绘制指令（无需else，前面判断不通过已return）
     send_command(cmd_draw_buf);
-    printf("DRIVER: DrawText at (X:%d, Y:%d): '%s'\n", x, y, str);
+    // printf("DRIVER: DrawText at (X:%d, Y:%d): '%s'\n", x, y, str);
 }
 
 /**
@@ -270,7 +272,7 @@ static void my_screen_draw_highlighted_text(uint8_t x, uint8_t y, const char* st
 
     // 发送反显指令
     send_command(cmd_draw_buf);
-    printf("DRIVER: DrawText REVERSE at (X:%d, Y:%d): '%s'\n", x, y, str);
+    // printf("DRIVER: DrawText REVERSE at (X:%d, Y:%d): '%s'\n", x, y, str);
 }
 
 /**
@@ -285,7 +287,7 @@ static void my_screen_draw_window(const char* title) {
     // 在 (0,0) 绘制标题
     my_screen_draw_text(0, 0, title_buffer);
     
-    printf("DRIVER: DrawWindow with Title: '%s'\n", title);
+    // printf("DRIVER: DrawWindow with Title: '%s'\n", title);
 }
 
 /**

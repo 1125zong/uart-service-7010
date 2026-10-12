@@ -19,7 +19,7 @@
 #define PL_AXI_UART_SCREEN_BASE		0x41220000
   
 extern volatile void* pl_uart_base_addr;  // For PL_AXI_UART_BASE (0x41200000)
-
+extern volatile void *pl_led_base_addr;	// For  PL_AXI_BASE (0x40000000)
 
 #define UART_TYPE_BASE  			0x330 
 typedef enum{
@@ -34,28 +34,30 @@ typedef enum{
 
 /* LED偏移 */
 
-//锁定状态LED偏移
+// 锁定状态LED偏移
 #define LOCKED_LED_OFFSET  					(0x30)
 
-//发送LED偏移
+// 发送LED偏移
 #define SEND_LED_OFFSET  					(0x230)
 
-//接收LED偏移
+// 接收LED偏移
 #define RECEIVE_LED_OFFSET  				(0x130)
 
-//设备锁定LED偏移
+// 设备锁定LED偏移
 #define DEVICE_LOCKED_LED_OFFSET 			(0x270)
 
-//看门狗控制寄存器偏移
+// 看门狗控制寄存器偏移
 #define WDT_CTRL_REG_OFFSET 				(0x274)
 
-//看门狗喂狗寄存器偏移
+// 看门狗喂狗寄存器偏移
 #define WDT_FEED_REG_OFFSET 				(0x278)
 
-
-//看门狗喂狗寄存器偏移
+// 看门狗喂狗寄存器偏移
 #define IIC_REG_OFFSET 				(0x280)
 
+// 端口镜像RX/TX寄存器偏移
+#define PORT_MIRROR_RX_OFFSET  (0x370)
+#define PORT_MIRROR_TX_OFFSET  (0x374)
 
 
 
@@ -135,6 +137,7 @@ void Portled(int i, int action);
 int axi16550FIFOInit(int port);
 void FPGA_Info_Read(void);
 void axi16550CheckSelfInit(unsigned int channel, unsigned int baud);
+int port_mirror_apply(unsigned char port, unsigned char direction);
 
 uint8_t UART_TX_FIFO_Ready(uint8_t channel);
 #endif /* AXI_16550_H_ */

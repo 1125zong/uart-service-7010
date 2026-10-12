@@ -38,7 +38,7 @@ static void main_on_enter(ui_manager_t* manager)
     // 4. 绘制 IP 地址 (第 1 行)
 #if (NUM_LAN_PORTS == 1)
     int IP_len = strlen(config->lan_ports[0].ip_address); // "IP: "
-    printf("IP_len: %d\n", IP_len);
+    // printf("IP_len: %d\n", IP_len);
     int IP_width = IP_len * FONT_WIDTH;
     int IPx_pos = (320 - IP_width) / 2;
     snprintf(manager->text_buffer, sizeof(manager->text_buffer), 

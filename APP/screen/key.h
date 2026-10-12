@@ -6,8 +6,8 @@ extern volatile void* pl_led_base_addr;
 // 按键硬件地址定义
 #define     KEY_MENU_ADDR     	(*(volatile unsigned int *)(pl_led_base_addr+0x20))
 #define     KEY_UP_ADDR       	(*(volatile unsigned int *)(pl_led_base_addr+0x24))
-#define     KEY_CONFIRM_ADDR    (*(volatile unsigned int *)(pl_led_base_addr+0x28))
-#define     KEY_DOWN_ADDR  		(*(volatile unsigned int *)(pl_led_base_addr+0x2C))
+#define     KEY_DOWN_ADDR    (*(volatile unsigned int *)(pl_led_base_addr+0x28))
+#define     KEY_CONFIRM_ADDR  	(*(volatile unsigned int *)(pl_led_base_addr+0x2C))
 
 
 #define     KEY_RESET  			(*(volatile unsigned int *)(pl_led_base_addr+0x400))

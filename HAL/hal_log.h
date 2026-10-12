@@ -61,7 +61,7 @@ void log_printf(LogLevel level, const char* func, int line, const char* format, 
 /* ------------------ Public API Macros (推荐使用) ------------------ */
 // 使用宏可以自动填充文件名和行号，并能在编译时移除低级别的日志调用以优化性能。
 
-#if 0  // 改回禁用状态
+#if 1  // 改回禁用状态
 
 #define LOG_DEBUG(...)    
 #define LOG_INFO(...)     

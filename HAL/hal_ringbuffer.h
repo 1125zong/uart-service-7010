@@ -58,7 +58,23 @@ struct ring_buffer_t
     ring_buffer_size_t tail_index;
     /** Index of head. */
     ring_buffer_size_t head_index;
+
+    /*可删除*/
+
+    ring_buffer_size_t max_used;
+    uint64_t overwrite_bytes;
+    /********************* */
 };
+
+/*可删除*/
+ring_buffer_size_t ring_buffer_num_items(ring_buffer_t *buffer);
+ring_buffer_size_t ring_buffer_get_max_used(const ring_buffer_t *buffer);
+uint64_t ring_buffer_get_overwrite_bytes(const ring_buffer_t *buffer);
+/* 只清空数据，不清除累计统计 */
+void ring_buffer_reset(ring_buffer_t *buffer);
+
+/*************/
+
 
 /**
  * Initializes the ring buffer pointed to by <em>buffer</em>.

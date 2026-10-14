@@ -47,71 +47,27 @@ void ring_buffer_init(ring_buffer_t *buffer, unsigned char *buf, size_t buf_size
     buffer->buffer_mask = buf_size - 1;
     buffer->tail_index = 0;
     buffer->head_index = 0;
-
-    /* 可删除 */
-    buffer->max_used = 0;
-    buffer->overwrite_bytes = 0;
-    /**********/
 }
 
-/*可删除*/
 void ring_buffer_reset(ring_buffer_t *buffer)
 {
     buffer->tail_index = 0;
     buffer->head_index = 0;
 }
 
-ring_buffer_size_t ring_buffer_get_max_used(const ring_buffer_t *buffer)
-{
-    return buffer->max_used;
-}
-uint64_t ring_buffer_get_overwrite_bytes(const ring_buffer_t *buffer)
-{
-    return buffer->overwrite_bytes;
-}
-/*********************/
-
-
-// void ring_buffer_queue(ring_buffer_t *buffer, char data)
-// {
-//     /* Is buffer full? */
-//     if (ring_buffer_is_full(buffer))
-//     {
-//         /* Is going to overwrite the oldest byte */
-//         /* Increase tail index */
-//         buffer->tail_index = ((buffer->tail_index + 1) & RING_BUFFER_MASK(buffer));
-//     }
-
-//     /* Place data in buffer */
-//     buffer->buffer[buffer->head_index] = data;
-//     buffer->head_index = ((buffer->head_index + 1) & RING_BUFFER_MASK(buffer));
-// }
-
-// 可删除-----最终替换为上面的
 void ring_buffer_queue(ring_buffer_t *buffer, char data)
 {
-    ring_buffer_size_t used;
-
+    /* Is buffer full? */
     if (ring_buffer_is_full(buffer))
     {
-        buffer->tail_index =
-            (buffer->tail_index + 1) &
-            RING_BUFFER_MASK(buffer);
-
-        buffer->overwrite_bytes++;
+        /* Is going to overwrite the oldest byte */
+        /* Increase tail index */
+        buffer->tail_index = ((buffer->tail_index + 1) & RING_BUFFER_MASK(buffer));
     }
 
+    /* Place data in buffer */
     buffer->buffer[buffer->head_index] = data;
-    buffer->head_index =
-        (buffer->head_index + 1) &
-        RING_BUFFER_MASK(buffer);
-
-    used = ring_buffer_num_items(buffer);
-
-    if (used > buffer->max_used)
-    {
-        buffer->max_used = used;
-    }
+    buffer->head_index = ((buffer->head_index + 1) & RING_BUFFER_MASK(buffer));
 }
 
 #if 0
@@ -125,80 +81,28 @@ void ring_buffer_queue_arr(ring_buffer_t *buffer, const char *data, ring_buffer_
     }
 }
 #else	
-// void ring_buffer_queue_arr(ring_buffer_t *buffer, const char *data, ring_buffer_size_t size)
-// {
-//     ring_buffer_size_t head = buffer->head_index;
-//     ring_buffer_size_t mask = buffer->buffer_mask;
-//     ring_buffer_size_t available = mask - ((head - buffer->tail_index) & mask);
-    
-//     if (size > available) {
-//         // 处理溢出
-//         buffer->tail_index = (buffer->tail_index + (size - available)) & mask;
-//     }
-    
-//     // 批量拷贝处理非跨越情况
-//     if ((head + size) <= mask + 1) {
-//         memcpy(&buffer->buffer[head], data, size);
-//     } else {
-//         // 处理跨越情况
-//         ring_buffer_size_t first_part = mask + 1 - head;
-//         memcpy(&buffer->buffer[head], data, first_part);
-//         memcpy(buffer->buffer, data + first_part, size - first_part);
-//     }
-    
-//     buffer->head_index = (head + size) & mask;
-// }
-
-// 可删除-----最终修改为上面的
-void ring_buffer_queue_arr(ring_buffer_t *buffer,
-                           const char *data,
-                           ring_buffer_size_t size)
+void ring_buffer_queue_arr(ring_buffer_t *buffer, const char *data, ring_buffer_size_t size)
 {
     ring_buffer_size_t head = buffer->head_index;
     ring_buffer_size_t mask = buffer->buffer_mask;
-    ring_buffer_size_t used;
-    ring_buffer_size_t available;
-    ring_buffer_size_t overwritten;
-
-    used = (head - buffer->tail_index) & mask;
-    available = mask - used;
-
-    if (size > available)
-    {
-        overwritten = size - available;
-
-        buffer->tail_index =
-            (buffer->tail_index + overwritten) & mask;
-
-        buffer->overwrite_bytes += overwritten;
+    ring_buffer_size_t available = mask - ((head - buffer->tail_index) & mask);
+    
+    if (size > available) {
+        // 处理溢出
+        buffer->tail_index = (buffer->tail_index + (size - available)) & mask;
     }
-
-    if ((head + size) <= mask + 1)
-    {
+    
+    // 批量拷贝处理非跨越情况
+    if ((head + size) <= mask + 1) {
         memcpy(&buffer->buffer[head], data, size);
+    } else {
+        // 处理跨越情况
+        ring_buffer_size_t first_part = mask + 1 - head;
+        memcpy(&buffer->buffer[head], data, first_part);
+        memcpy(buffer->buffer, data + first_part, size - first_part);
     }
-    else
-    {
-        ring_buffer_size_t first_part =
-            mask + 1 - head;
-
-        memcpy(&buffer->buffer[head],
-               data,
-               first_part);
-
-        memcpy(buffer->buffer,
-               data + first_part,
-               size - first_part);
-    }
-
+    
     buffer->head_index = (head + size) & mask;
-
-    used = ring_buffer_num_items(buffer);
-
-    if (used > buffer->max_used)
-    {
-        buffer->max_used = used;
-    }
 }
 #endif
 
@@ -215,6 +119,8 @@ uint8_t ring_buffer_dequeue(ring_buffer_t *buffer, char *data)
     buffer->tail_index = ((buffer->tail_index + 1) & RING_BUFFER_MASK(buffer));
     return 1;
 }
+
+
 
 ring_buffer_size_t ring_buffer_dequeue_arr(ring_buffer_t *buffer, char *data, ring_buffer_size_t len)
 {
@@ -234,6 +140,65 @@ ring_buffer_size_t ring_buffer_dequeue_arr(ring_buffer_t *buffer, char *data, ri
     return cnt;
 }
 
+
+ring_buffer_size_t ring_buffer_peek_arr(ring_buffer_t *buffer, char *data, ring_buffer_size_t len)
+{
+    ring_buffer_size_t available;
+    ring_buffer_size_t tail;
+    ring_buffer_size_t capacity;
+    ring_buffer_size_t first_part;
+
+    available = ring_buffer_num_items(buffer);
+
+    if (len > available)
+    {
+        len = available;
+    }
+
+    if (len == 0)
+    {
+        return 0;
+    }
+
+    tail = buffer->tail_index;
+    capacity = buffer->buffer_mask + 1;
+
+    first_part = capacity - tail;
+
+    if (first_part > len)
+    {
+        first_part = len;
+    }
+
+    memcpy(data, &buffer->buffer[tail], first_part);
+
+    if (len > first_part)
+    {
+        memcpy(data + first_part, buffer->buffer, len - first_part);
+    }
+
+    return len;
+}
+
+ring_buffer_size_t ring_buffer_discard( ring_buffer_t *buffer, ring_buffer_size_t len)
+{
+    ring_buffer_size_t available;
+
+    available = ring_buffer_num_items(buffer);
+
+    if (len > available)
+    {
+        len = available;
+    }
+
+    buffer->tail_index = (buffer->tail_index + len) & RING_BUFFER_MASK(buffer);
+
+    return len;
+}
+
+
+/**/
+
 uint8_t ring_buffer_peek(ring_buffer_t *buffer, char *data, ring_buffer_size_t index)
 {
     if (index >= ring_buffer_num_items(buffer))
@@ -247,8 +212,3 @@ uint8_t ring_buffer_peek(ring_buffer_t *buffer, char *data, ring_buffer_size_t i
     *data = buffer->buffer[data_index];
     return 1;
 }
-
-/*可删除*/
-
-
-/******************/

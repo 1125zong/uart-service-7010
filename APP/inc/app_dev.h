@@ -462,16 +462,6 @@ typedef struct
     unsigned int rx_net;
     unsigned long long tx_total_count;
     unsigned long long rx_total_count;
-    // 可删除
-    
-unsigned long long tcp_send_requested_bytes;
-unsigned long long tcp_send_actual_bytes;
-unsigned long long tcp_short_write_count;
-unsigned long long tcp_unsent_bytes;
-unsigned long long tcp_send_eagain_count;
-unsigned long long tcp_send_error_count;
-    /**/
-
 
     /* -- 串口错误统计 -- */
     unsigned int frame_error_count;    /* 帧错误计数 */

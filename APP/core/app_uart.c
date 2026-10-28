@@ -11,8 +11,7 @@
 #include "app_com.h"
 #include "app_uart.h"
 
-const int bauderate_table[] = { 300, 600, 1200, 2400, 4800, 7200, 9600, 19200,
-								38400, 57600, 115200, 230400, 460800, 921600, 150, 134, 110, 75, 50 };
+const int bauderate_table[] = {50, 75, 110, 134, 150, 300, 600, 1200, 1800, 2400, 4800, 7200, 9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600};
 const unsigned int data_bit_table[] = { 5, 6, 7, 8 };
 
 int socket_send_to_middle(int sock_fd, char *buf, int buf_len) 
@@ -148,7 +147,14 @@ int init_usart(ChannelState *uart_instance, int client_socket, char *buf, int bu
 	/*调用AXI_api设置串口相关寄存器*/
 	axi165502CInit(&uart_info, channel);
 
+	semTake(g_stats_mutex, WAIT_FOREVER);
+	if (uart_instance->uart_state != UART_STATE_OPENED)
+	{
+		uart_instance->tx_count = 0;
+		uart_instance->rx_count = 0;
+	}
 	uart_instance->uart_state = UART_STATE_OPENED;
+	semGive(g_stats_mutex);
 
 	uart_instance->usart_mcr_dtr = (unsigned char) buf[4];
 

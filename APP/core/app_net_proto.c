@@ -1158,35 +1158,44 @@ void handle_monitor_request(int session_index, const unsigned char* frame, int l
                         ChannelState* ch = &g_system_config.channels[channel_index];
                         unsigned int temp_32;
                         unsigned long long temp_64;
+                        unsigned int tx_cnt, rx_cnt;
+                        unsigned long long tx_total, rx_total;
+
+                        semTake(g_stats_mutex, WAIT_FOREVER);
+                        tx_cnt = ch->tx_count;
+                        rx_cnt = ch->rx_count;
+                        tx_total = ch->tx_total_count;
+                        rx_total = ch->rx_total_count;
+                        semGive(g_stats_mutex);
                         
                         LOG_DEBUG("  [SENDING] Port %d Monitor Async Data:", port_index);
 
                         response[offset++] = port_index;
 
-                        temp_32 = htonl(ch->tx_count);
+                        temp_32 = htonl(tx_cnt);
                         memcpy(&response[offset], &temp_32, 4); offset += 4;
-                        LOG_DEBUG("    - TX Count: %u", ch->tx_count);
+                        LOG_DEBUG("    - TX Count: %u", tx_cnt);
 
-                        temp_32 = htonl(ch->rx_count);
+                        temp_32 = htonl(rx_cnt);
                         memcpy(&response[offset], &temp_32, 4); offset += 4;
-                        LOG_DEBUG("    - RX Count: %u", ch->rx_count);
+                        LOG_DEBUG("    - RX Count: %u", rx_cnt);
                         
                         // 注意: VxWorks可能没有htobe64, 需要手动转换
                          
-                        temp_64 = ch->tx_total_count;
+                        temp_64 = tx_total;
                         response[offset++] = (temp_64 >> 56) & 0xFF; response[offset++] = (temp_64 >> 48) & 0xFF;
                         response[offset++] = (temp_64 >> 40) & 0xFF; response[offset++] = (temp_64 >> 32) & 0xFF;
                         response[offset++] = (temp_64 >> 24) & 0xFF; response[offset++] = (temp_64 >> 16) & 0xFF;
 
                         response[offset++] = (temp_64 >> 8) & 0xFF;  response[offset++] = temp_64 & 0xFF;
-                        LOG_DEBUG("    - TX Total Count: %llu", ch->tx_total_count);
+                        LOG_DEBUG("    - TX Total Count: %llu", tx_total);
 
-                        temp_64 = ch->rx_total_count;
+                        temp_64 = rx_total;
                         response[offset++] = (temp_64 >> 56) & 0xFF; response[offset++] = (temp_64 >> 48) & 0xFF;
                         response[offset++] = (temp_64 >> 40) & 0xFF; response[offset++] = (temp_64 >> 32) & 0xFF;
                         response[offset++] = (temp_64 >> 24) & 0xFF; response[offset++] = (temp_64 >> 16) & 0xFF;
                         response[offset++] = (temp_64 >> 8) & 0xFF;  response[offset++] = temp_64 & 0xFF;
-                        LOG_DEBUG("    - RX Total Count: %llu", ch->rx_total_count);
+                        LOG_DEBUG("    - RX Total Count: %llu", rx_total);
 
                         response[offset++] = ch->dsr_status;
                         response[offset++] = ch->cts_status;

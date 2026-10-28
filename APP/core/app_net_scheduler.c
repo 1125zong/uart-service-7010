@@ -21,7 +21,7 @@
 #endif
 
 #define NET_SEND_BATCH_SIZE       64U
-#define NET_SEND_MAX_WAIT_US      1000ULL
+#define NET_SEND_MAX_WAIT_US      0ULL
 #define NET_SEND_TEST_CHANNEL     0
 
 static uint64_t s_net_send_first_us[NUM_PORTS] = {0};
@@ -168,7 +168,11 @@ void check_for_new_connections(void)
 						uart_cfg.stop_bit   = channel->stop_bits;
 						uart_cfg.parity     = (channel->parity == 2) ? 2 : (channel->parity != 0);
 						axi165502CInit(&uart_cfg, i);
+						semTake(g_stats_mutex, WAIT_FOREVER);
+						channel->tx_count = 0;
+						channel->rx_count = 0;
 						channel->uart_state = UART_STATE_OPENED;
+						semGive(g_stats_mutex);
 						LOG_INFO("NetScheduler: Ch %d UART auto-init (baud=%d)\n",
 								 i, channel->baudrate);
 					}
@@ -293,7 +297,7 @@ void run_net_recv(void)
 
 
                     /******    临时添加    *****/
-                    LOG_DEBUG("[NET RX] Port=%d, len=%d, data=%02X\n", i + 1, n, (unsigned char)temp_buffer_net_rx[0]);
+                    // LOG_DEBUG("[NET RX] Port=%d, len=%d, data=%02X\n", i + 1, n, (unsigned char)temp_buffer_net_rx[0]);
                     /****/
 
 
@@ -365,8 +369,7 @@ void run_net_send(void)
         }
 
         /* 仅对 UART0 单客户连接启用 64B/1ms 聚合发送。 */
-        if (i == NET_SEND_TEST_CHANNEL &&
-            channel->data_net_info.num_clients == 1)
+        if (i == NET_SEND_TEST_CHANNEL && channel->data_net_info.num_clients == 1)
         {
             if (s_net_send_first_us[i] == 0)
             {

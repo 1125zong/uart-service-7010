@@ -162,12 +162,12 @@ static void pack_port_serial_info(ChannelState *ch, int ch_idx, unsigned char *b
     uint32_t tx_cnt, rx_cnt;
     uint64_t tx_total, rx_total;
 
-    semTake(g_config_mutex, WAIT_FOREVER);
+    semTake(g_stats_mutex, WAIT_FOREVER);
     tx_cnt    = ch->tx_count;
     rx_cnt    = ch->rx_count;
     tx_total  = ch->tx_total_count;
     rx_total  = ch->rx_total_count;
-    semGive(g_config_mutex);
+    semGive(g_stats_mutex);
 
     /* 串口索引 (1-based) */
     buf[(*offset)++] = ch_idx + 1;

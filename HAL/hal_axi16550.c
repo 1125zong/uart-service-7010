@@ -424,7 +424,7 @@ void axi165502CInit(usart_info_t *uart_instance, int channel)
     userAxiCfgWrite(channel, AXI_16550_DLL, dll);
     userAxiCfgWrite(channel, AXI_16550_LCR, reg & 0x7F);
     userAxiCfgWrite(channel, AXI_16550_LCR, reg | lcr);
-    userAxiCfgWrite(channel, AXI_16550_MCR, 0x00); /* Normal mode, loopback disabled (bit 4 = 0) 10 00*/
+    userAxiCfgWrite(channel, AXI_16550_MCR, 0x00); /* MCR bit 4: 1 = loopback enabled (0x10), 0 = loopback disabled (0x00)*/
     userAxiCfgWrite(channel, AXI_16550_IER, 0x00);
     
     axi16550FIFOInit(channel);

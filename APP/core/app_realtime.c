@@ -47,8 +47,8 @@ static void run_medium_frequency_tasks(void);
 static SEM_ID s_timer_sync_sem; // 用于定时器ISR与任务同步的二进制信号量
 static volatile uint32_t timer_cnt = 0;
 
-static uint32_t s_last_rx_count[NUM_PORTS] = {0};
-static uint32_t s_last_tx_count[NUM_PORTS] = {0};
+static uint64_t s_last_rx_count[NUM_PORTS] = {0};
+static uint64_t s_last_tx_count[NUM_PORTS] = {0};
 static time_t s_last_rx_led_time[NUM_PORTS] = {0};  // 存储RX LED最后活动时间戳
 static time_t s_last_tx_led_time[NUM_PORTS] = {0};  // 存储TX LED最后活动时间戳
 
@@ -193,16 +193,16 @@ static void handle_serial_tx_rx(void)
     for (i = 0; i < NUM_PORTS; i++)
     {
         ChannelState* channel = &g_system_config.channels[i];
-        if (channel->data_net_info.num_clients == 0 || channel->uart_state != UART_STATE_OPENED)
+        if (channel->uart_state != UART_STATE_OPENED)
             continue;
 
         /* --- TX: buffer_net → UART --- */
-        if (!ring_buffer_is_empty(&channel->buffer_net) && axi16550_TxReady(i))
+        if (channel->data_net_info.num_clients > 0 &&
+            !ring_buffer_is_empty(&channel->buffer_net) && axi16550_TxReady(i))
         {
             uint32_t bytes_count = ring_buffer_dequeue_arr(&channel->buffer_net, (char*)temp_buffer, TX_CHUNK_SIZE);
             if (bytes_count > 0)
             {
-                channel->tx_count += bytes_count;
                 /* 记录 UART TX 起始时间 */
                 // clock_gettime(CLOCK_MONOTONIC, &t_uart_tx);
 
@@ -214,7 +214,13 @@ static void handle_serial_tx_rx(void)
         //                                     userAxiCfgRead(i, AXI_16550_MCR) & 0xFF);
         //         /**********/
 
-                axi16550SendNoWait(i, temp_buffer, bytes_count);
+                if (axi16550SendNoWait(i, temp_buffer, bytes_count) == 0)
+                {
+                    semTake(g_stats_mutex, WAIT_FOREVER);
+                    channel->tx_count += bytes_count;
+                    channel->tx_total_count += bytes_count;
+                    semGive(g_stats_mutex);
+                }
             }
         }
 
@@ -227,8 +233,14 @@ static void handle_serial_tx_rx(void)
                              &channel->overrun_error_count,
                              &channel->break_count) == 0 && bytes_count > 0)
             {
+                semTake(g_stats_mutex, WAIT_FOREVER);
                 channel->rx_count += bytes_count;
-                ring_buffer_queue_arr(&channel->buffer_uart, (const char*)temp_buffer, bytes_count);
+                channel->rx_total_count += bytes_count;
+                semGive(g_stats_mutex);
+                if (channel->data_net_info.num_clients > 0)
+                {
+                    ring_buffer_queue_arr(&channel->buffer_uart, (const char*)temp_buffer, bytes_count);
+                }
             }
         }
     }
@@ -267,16 +279,25 @@ static void handle_led_blinking(void)
     for (i = 0; i < NUM_PORTS; i++)
     {
         ChannelState* channel = &g_system_config.channels[i];
+        uint64_t rx_total, tx_total;
+        semTake(g_stats_mutex, WAIT_FOREVER);
+        rx_total = channel->rx_total_count;
+        tx_total = channel->tx_total_count;
+        semGive(g_stats_mutex);
         uint8_t current_rx_led_state = s_last_rx_led_state[i];
         uint8_t current_tx_led_state = s_last_tx_led_state[i];
 
         // --- 处理 RX LED ---
         // 1. 检测数据接收活动
-        if (channel->rx_count > s_last_rx_count[i])
+        if (rx_total > s_last_rx_count[i])
         {
             s_last_rx_led_time[i] = current_time;  // 记录活动时间戳
-            s_last_rx_count[i] = channel->rx_count; // 更新上次的计数值
+            s_last_rx_count[i] = rx_total; // 更新上次的计数值
             current_rx_led_state = 1; // 设置LED为点亮状态
+        }
+        else if (rx_total < s_last_rx_count[i])
+        {
+            s_last_rx_count[i] = rx_total;
         }
         else if (current_time - s_last_rx_led_time[i] >= LED_ON_DURATION_SECONDS)
         {
@@ -294,11 +315,15 @@ static void handle_led_blinking(void)
 
         // --- 处理 TX LED ---
         // 1. 检测数据发送活动
-        if (channel->tx_count > s_last_tx_count[i])
+        if (tx_total > s_last_tx_count[i])
         {
             s_last_tx_led_time[i] = current_time;  // 记录活动时间戳
-            s_last_tx_count[i] = channel->tx_count; // 更新上次的计数值
+            s_last_tx_count[i] = tx_total; // 更新上次的计数值
             current_tx_led_state = 1; // 设置LED为点亮状态
+        }
+        else if (tx_total < s_last_tx_count[i])
+        {
+            s_last_tx_count[i] = tx_total;
         }
         else if (current_time - s_last_tx_led_time[i] >= LED_ON_DURATION_SECONDS)
         {
@@ -361,10 +386,12 @@ void channel_buffer_cnt_all(void)
 void channel_count_clr(uint8_t channel_index)
 {
     ChannelState* channel = &g_system_config.channels[channel_index];
+    semTake(g_stats_mutex, WAIT_FOREVER);
     channel->tx_net = 0;
     channel->rx_net = 0;
     channel->rx_count = 0;
     channel->tx_count = 0;
+    semGive(g_stats_mutex);
 }
 
 
@@ -428,14 +455,18 @@ void app_realtime_performance_monitor(void)
         unsigned long long current_total_tx = 0;
         
         // 计算总收发数据量
+        semTake(g_stats_mutex, WAIT_FOREVER);
         for (int i = 0; i < NUM_PORTS; i++) {
-            current_total_rx += g_system_config.channels[i].rx_count;
-            current_total_tx += g_system_config.channels[i].tx_count;
+            current_total_rx += g_system_config.channels[i].rx_total_count;
+            current_total_tx += g_system_config.channels[i].tx_total_count;
         }
+        semGive(g_stats_mutex);
         
         // 计算5秒内的数据量
-        unsigned long long rx_delta = current_total_rx - s_prev_total_rx;
-        unsigned long long tx_delta = current_total_tx - s_prev_total_tx;
+        unsigned long long rx_delta = current_total_rx >= s_prev_total_rx
+                                    ? current_total_rx - s_prev_total_rx : 0;
+        unsigned long long tx_delta = current_total_tx >= s_prev_total_tx
+                                    ? current_total_tx - s_prev_total_tx : 0;
         
         // 计算平均速率
         double rx_rate = (double)rx_delta / 5.0;

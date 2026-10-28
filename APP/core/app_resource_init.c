@@ -18,6 +18,7 @@ MSG_Q_ID g_net_conn_q[NUM_PORTS];
 MSG_Q_ID g_serial_port_ctrl_q[NUM_PORTS];
 
 SEM_ID g_config_mutex;
+SEM_ID g_stats_mutex;
 
 // 任务ID变量定义
 TASK_ID g_conn_manager_tid;
@@ -59,6 +60,13 @@ STATUS init_global_resources(void) {
     if (g_config_mutex == NULL)
     {
         LOG_ERROR("FATAL: Failed to create config mutex.\n");
+        return ERROR;
+    }
+
+    g_stats_mutex = semMCreate(SEM_Q_PRIORITY | SEM_INVERSION_SAFE);
+    if (g_stats_mutex == NULL)
+    {
+        LOG_ERROR("FATAL: Failed to create stats mutex.\n");
         return ERROR;
     }
     

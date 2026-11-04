@@ -405,9 +405,26 @@ static void cleanup_config_connection(int index)
             
             // *** 检查数据通道是否也已没有客户端 ***
             if (channel->data_net_info.num_clients == 0) {
-                channel->uart_state = UART_STATE_CLOSED;
                 channel->is_connected = PORT_CONNECT_NONE;
-                LOG_INFO("ConfigTask: All network clients for Ch %d disconnected. UART physical state -> CLOSED.\n", channel_index);
+
+                /* 数据发送尚未排空时，由实时任务在 TxIdle 后关闭 UART。 */
+                if (channel->uart_state == UART_STATE_OPENED &&
+                    channel->interface_type != INTERFACE_TYPE_RS485_RX &&
+                    (!ring_buffer_is_empty(&channel->buffer_net) ||
+                     !axi16550_Tx_IDLE(channel_index)))
+                {
+                    LOG_INFO("ConfigTask: All network clients for Ch %d disconnected. "
+                             "UART close deferred until TX drain.\n",
+                             channel_index);
+                }
+                else
+                {
+                    channel->uart_state = UART_STATE_CLOSED;
+                    ring_buffer_reset(&channel->buffer_net);
+                    LOG_INFO("ConfigTask: All network clients for Ch %d disconnected. "
+                             "UART physical state -> CLOSED.\n",
+                             channel_index);
+                }
             }
         }
         semGive(g_config_mutex);

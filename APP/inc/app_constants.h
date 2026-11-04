@@ -70,10 +70,12 @@ typedef enum
 // Interface types
 typedef enum 
 { 
-    INTERFACE_TYPE_RS232   = 0x00,
-    INTERFACE_TYPE_RS422   = 0x01,
-    INTERFACE_TYPE_RS485   = 0x02,
-    INTERFACE_TYPE_CAN     = 0x03
+    INTERFACE_TYPE_RS232       = 0x00,
+    INTERFACE_TYPE_RS422       = 0x01,
+    INTERFACE_TYPE_RS485_TX    = 0x02,
+    INTERFACE_TYPE_RS485_4WIRE = 0x03,
+    INTERFACE_TYPE_RS485_RX    = 0x04,
+    INTERFACE_TYPE_CAN         = 0x05
 } Interface_Mode;
 
 #endif /* APP_CONSTANTS_H */

@@ -50,7 +50,7 @@ typedef enum{
 /* Base addresses and register offsets */
 #define AXI_UART_BASE(n)         (pl_uart_base_addr + 0x2000 * n) /* ����ַ */
 #define AXI_16550_INT            (84)
-#define AXI_16550_CLK            (29491200) //29491200
+#define AXI_16550_CLK            (117964800) //29491200
 #define AXI_16550_CLK1           (32000000)
 #define AXI_16550_RBR            (0x1000)
 #define AXI_16550_THR            (0x1000)

@@ -38,7 +38,7 @@
 #define DEVICE_SERIAL_NO_YEAR        (0x07E9)  //2025
 #define DEVICE_SERIAL_NO_MONTH       (0x05)
 #define DEVICE_SERIAL_NO_DAY         (0x01)
-#define DEVICE_NUMBER                (0x000005)    
+#define DEVICE_NUMBER                (0x000002)    
 
 //固件版本
 #define FW_VERSION_MAJOR             (0x01)        
@@ -170,8 +170,10 @@ typedef enum
 { 
     INTERFACE_TYPE_RS232   = 0x00,
     INTERFACE_TYPE_RS422   = 0x01,
-    INTERFACE_TYPE_RS485   = 0x02,
-    INTERFACE_TYPE_CAN     = 0x03
+    INTERFACE_TYPE_RS485_TX   = 0x02,
+    INTERFACE_TYPE_RS485_4WIRE = 0x03,
+    INTERFACE_TYPE_RS485_RX    = 0x04,
+    INTERFACE_TYPE_CAN     = 0x05
 } Interface_Mode;
 
 //接口数量

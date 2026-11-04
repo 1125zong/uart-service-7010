@@ -20,11 +20,31 @@
 #define TX_CHUNK_SIZE (UART_HW_FIFO_SIZE / 2)
 #endif
 
+#define NET_SEND_BATCH_SIZE 64U
+#define NET_SEND_MAX_WAIT_US 0ULL
+#define NET_SEND_TEST_CHANNEL 0
+
+static uint64_t s_net_send_first_us[NUM_PORTS] = {0};
+
+/*
+ * 发生短写或EAGAIN后，下一轮不再等待聚合时间，
+ * 直接重试未发送的数据。
+ */
+static uint8_t s_net_send_retry_immediately[NUM_PORTS] = {0};
+
+static uint64_t net_send_now_us(void)
+{
+    struct timespec ts;
+
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+
+    return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000ULL;
+}
 /* ------------------ Private Function Prototypes ------------------ */
 void check_for_new_connections(void);
 void run_net_recv(void);
 void run_net_send(void);
-static void cleanup_data_connection(int channel_index,int client_index_in_array);
+static void cleanup_data_connection(int channel_index, int client_index_in_array);
 
 static int is_locked_port_client_allowed(int channel_index, int client_fd);
 extern int g_active_tcp_connections[NUM_PORTS];
@@ -41,28 +61,26 @@ extern struct timespec diff_timespec(struct timespec start, struct timespec end)
 /**
  * @brief 网络调度任务的主入口函数
  */
-void NetworkSchedulerTask(void) 
+void NetworkSchedulerTask(void)
 {
-	// 检查并接管来自ConnectionManager的新数据连接
-	check_for_new_connections();
+    // 检查并接管来自ConnectionManager的新数据连接
+    check_for_new_connections();
 
-	// 处理所有活跃数据通道的网络接收
+    // 处理所有活跃数据通道的网络接收
 
-    //clock_gettime(CLOCK_MONOTONIC, &start);
-	run_net_recv();
-	// 处理所有活跃数据通道的网络发送
-	run_net_send();
+    // clock_gettime(CLOCK_MONOTONIC, &start);
+    run_net_recv();
+    // 处理所有活跃数据通道的网络发送
 
-    //clock_gettime(CLOCK_MONOTONIC, &end);
+    run_net_send();
 
-    //计算时间差
-    //diff = diff_timespec(start, end);
+    // clock_gettime(CLOCK_MONOTONIC, &end);
 
-    //打印时间差
-    //printf("执行时间: %ld 秒 %ld 毫秒 %ld 微秒\n",diff.tv_sec,diff.tv_nsec / 1000000,    diff.tv_nsec / 1000);   // 微秒
+    // 计算时间差
+    // diff = diff_timespec(start, end);
 
-
-
+    // 打印时间差
+    // printf("执行时间: %ld 秒 %ld 毫秒 %ld 微秒\n",diff.tv_sec,diff.tv_nsec / 1000000,    diff.tv_nsec / 1000);   // 微秒
 }
 
 /**
@@ -79,25 +97,25 @@ void NetworkSchedulerTask(void)
  * 4. 更新客户端计数器 (num_clients)，并处理连接数已满的情况。
  * 5. 使用互斥信号量 g_config_mutex 保证对共享配置 g_system_config 的原子操作。
  */
-void check_for_new_connections(void) 
+void check_for_new_connections(void)
 {
     NewConnectionMsg msg;
     int i; // 用于遍历通道
     // 1. 遍历所有通道的消息队列
-    for (i = 0; i < NUM_PORTS; i++) 
+    for (i = 0; i < NUM_PORTS; i++)
     {
         // 使用 while 循环来排空当前通道队列中的所有消息
-        if (msgQReceive(g_net_conn_q[i], (char*) &msg, sizeof(msg), NO_WAIT) == sizeof(NewConnectionMsg))
+        if (msgQReceive(g_net_conn_q[i], (char *)&msg, sizeof(msg), NO_WAIT) == sizeof(NewConnectionMsg))
         {
             // 验证消息的合法性
-            if ( msg.channel_index != i ) 
+            if (msg.channel_index != i)
             {
-                LOG_ERROR("NetScheduler: Mismatched channel index in message! Queue_idx=%d, msg.ch_idx=%d. Closing fd=%d\n",i, msg.channel_index, msg.client_fd);
+                LOG_ERROR("NetScheduler: Mismatched channel index in message! Queue_idx=%d, msg.ch_idx=%d. Closing fd=%d\n", i, msg.channel_index, msg.client_fd);
                 close(msg.client_fd);
                 continue; // 处理下一条消息
             }
 
-            ChannelState* channel = &g_system_config.channels[i];
+            ChannelState *channel = &g_system_config.channels[i];
 
             /* 端口锁定时，只允许锁定该端口的PC建立数据连接 */
             if ((msg.type == CONN_TYPE_REALCOM_DATA || msg.type == CONN_TYPE_TCPSERVER) && !is_locked_port_client_allowed(i, msg.client_fd))
@@ -124,49 +142,52 @@ void check_for_new_connections(void)
                     g_active_tcp_connections[i]--;
                 }
                 continue;
-            } 
-
+            }
 
             // 2. 根据连接类型，选择正确的 NetInfo 结构体来存放 fd
             switch (msg.type)
             {
-				case CONN_TYPE_TCPSERVER:
-				case CONN_TYPE_REALCOM_DATA:
-					channel->data_net_info.state = NET_STATE_CONNECTED;
-					channel->data_net_info.client_fds[channel->data_net_info.num_clients] = msg.client_fd;
-					channel->data_net_info.num_clients++;
-					channel->is_connected = PORT_CONNECTD;
+            case CONN_TYPE_TCPSERVER:
+            case CONN_TYPE_REALCOM_DATA:
+                channel->data_net_info.state = NET_STATE_CONNECTED;
+                channel->data_net_info.client_fds[channel->data_net_info.num_clients] = msg.client_fd;
+                channel->data_net_info.num_clients++;
+                channel->is_connected = PORT_CONNECTD;
 
-					/* TCP Server: 客户端连接时自动初始化串口(若未初始化) */
-					if (msg.type == CONN_TYPE_TCPSERVER && channel->uart_state != UART_STATE_OPENED)
-					{
-						usart_info_t uart_cfg;
-						memset(&uart_cfg, 0, sizeof(uart_cfg));
-						uart_cfg.baud_rate = channel->baudrate;
-						uart_cfg.data_bit   = channel->data_bits;
-						uart_cfg.stop_bit   = channel->stop_bits;
-						uart_cfg.parity     = (channel->parity == 2) ? 2 : (channel->parity != 0);
-						axi165502CInit(&uart_cfg, i);
-						channel->uart_state = UART_STATE_OPENED;
-						LOG_INFO("NetScheduler: Ch %d UART auto-init (baud=%d)\n",
-								 i, channel->baudrate);
-					}
-				break;
+                /* TCP Server: 客户端连接时自动初始化串口(若未初始化) */
+                if (msg.type == CONN_TYPE_TCPSERVER && channel->uart_state != UART_STATE_OPENED)
+                {
+                    usart_info_t uart_cfg;
+                    memset(&uart_cfg, 0, sizeof(uart_cfg));
+                    uart_cfg.baud_rate = channel->baudrate;
+                    uart_cfg.data_bit = channel->data_bits;
+                    uart_cfg.stop_bit = channel->stop_bits;
+                    uart_cfg.parity = (channel->parity == 2) ? 2 : (channel->parity != 0);
+                    axi165502CInit(&uart_cfg, i);
+                    semTake(g_stats_mutex, WAIT_FOREVER);
+                    channel->tx_count = 0;
+                    channel->rx_count = 0;
+                    channel->uart_state = UART_STATE_OPENED;
+                    semGive(g_stats_mutex);
+                    LOG_INFO("NetScheduler: Ch %d UART auto-init (baud=%d)\n",
+                             i, channel->baudrate);
+                }
+                break;
 
-                case CONN_TYPE_TCPCLIENT:
-				case CONN_TYPE_UDP:
+            case CONN_TYPE_TCPCLIENT:
+            case CONN_TYPE_UDP:
 
-				break;
-                
-                default:
-                    LOG_ERROR("NetScheduler: Ch %d received unknown conn_type %d. Closing fd=%d\n",i, msg.type, msg.client_fd);
-                    close(msg.client_fd);
-                    continue; // 跳过此无效消息
+                break;
+
+            default:
+                LOG_ERROR("NetScheduler: Ch %d received unknown conn_type %d. Closing fd=%d\n", i, msg.type, msg.client_fd);
+                close(msg.client_fd);
+                continue; // 跳过此无效消息
             }
-			
-			LOG_DEBUG("NetScheduler: Ch %d accepted new connection fd=%d, type=%d. Total clients: %d (Data).\n",
-					 i, msg.client_fd, msg.type,
-					 channel->data_net_info.num_clients);
+
+            LOG_DEBUG("NetScheduler: Ch %d accepted new connection fd=%d, type=%d. Total clients: %d (Data).\n",
+                      i, msg.client_fd, msg.type,
+                      channel->data_net_info.num_clients);
         }
     }
     // (处理全局配置连接队列 g_config_conn_q 的逻辑可以放在这里，如果需要的话)
@@ -197,10 +218,10 @@ void check_for_new_connections(void)
  *
  * =====================================================================================
  */
-#define TX_NET_SIZE (4096) 
+#define TX_NET_SIZE (4096)
 unsigned char temp_buffer_net_rx[TX_NET_SIZE];
 
-void run_net_recv(void) 
+void run_net_recv(void)
 {
     int i, j;
     fd_set readfds; // 用于 select 的可读文件描述符集合
@@ -213,14 +234,14 @@ void run_net_recv(void)
     // 1. 构建 fd_set，包含所有通道的所有活动客户端
     for (i = 0; i < NUM_PORTS; i++)
     {
-        ChannelState* channel = &g_system_config.channels[i];
+        ChannelState *channel = &g_system_config.channels[i];
         for (j = channel->data_net_info.num_clients - 1; j >= 0; j--)
         {
             int fd = channel->data_net_info.client_fds[j];
             if (fd >= 0)
             {
                 FD_SET(fd, &readfds);
-                if (fd > max_fd) 
+                if (fd > max_fd)
                 {
                     max_fd = fd;
                 }
@@ -229,7 +250,7 @@ void run_net_recv(void)
         }
     }
 
-    if (!has_fds) 
+    if (!has_fds)
     {
         return; // 没有任何活动的客户端，直接返回
     }
@@ -248,52 +269,61 @@ void run_net_recv(void)
     }
 
     // 3. 仅对 select() 报告为可读的 fd 执行 recv()
-    for (i = 0; i < NUM_PORTS; i++) //NUM_PORTS
+    for (i = 0; i < NUM_PORTS; i++) // NUM_PORTS
     {
-        ChannelState* channel = &g_system_config.channels[i];
+        ChannelState *channel = &g_system_config.channels[i];
         for (j = channel->data_net_info.num_clients - 1; j >= 0; j--)
         {
             int fd = channel->data_net_info.client_fds[j];
-            
+
             // 检查这个 fd 是否在可读集合中
-            if (fd >= 0 && FD_ISSET(fd, &readfds)) 
+            if (fd >= 0 && FD_ISSET(fd, &readfds))
             {
-                
+
                 // (由于 select() 保证了可读性，此处的 recv() 不会阻塞)
-                int n = recv(fd, (char*) temp_buffer_net_rx, sizeof(temp_buffer_net_rx), 0);
-                //printf("waiting for data to recv...\n");
+                int n = recv(fd, (char *)temp_buffer_net_rx, sizeof(temp_buffer_net_rx), 0);
                 if (n > 0)
                 {
                     // 记录环回测试起始时间
-                    //clock_gettime(CLOCK_MONOTONIC, &t_loopback_start);
+                    // clock_gettime(CLOCK_MONOTONIC, &t_loopback_start);
                     // 成功读取数据
                     channel->tx_net += n;
 
-
-
                     /******    临时添加    *****/
-                    LOG_DEBUG("[NET RX] Port=%d, len=%d, data=%02X\n", i + 1, n, (unsigned char)temp_buffer_net_rx[0]);
+                    // printf("[NET RX] Port=%d, len=%d, data=", i + 1, n);
+                    // for (int k = 0; k < n; k++)
+                    // {
+                    //     printf("%02X ", (unsigned char)temp_buffer_net_rx[k]);
+                    // }
+                    // printf("\n");
                     /****/
 
+                    // LOG_DEBUG("Data: NetScheduler: Ch %d received %d bytes on fd %d.\n", i, n, fd);
+                    // printf("Data: NetScheduler: Ch %d received %d bytes on fd %d.\n", i, n, fd);
+                    //  打印接收到的网络数据
+                    // LOG_DEBUG("netRecvData: %s\n", temp_buffer_net_rx);
 
-                    //LOG_DEBUG("Data: NetScheduler: Ch %d received %d bytes on fd %d.\n", i, n, fd);
-                    //printf("Data: NetScheduler: Ch %d received %d bytes on fd %d.\n", i, n, fd);
-                    // 打印接收到的网络数据
-                    //LOG_DEBUG("netRecvData: %s\n", temp_buffer_net_rx);
-
-                    ring_buffer_queue_arr(&channel->buffer_net, (char*) temp_buffer_net_rx, n);
-                } 
+                    if (semTake(g_config_mutex, WAIT_FOREVER) == OK)
+                    {
+                        ring_buffer_queue_arr(&channel->buffer_net, (char *)temp_buffer_net_rx, n);
+                        semGive(g_config_mutex);
+                    }
+                    else
+                    {
+                        LOG_ERROR("Failed to lock TX queue for channel %d\n", i);
+                    }
+                }
                 else if (n == 0)
                 {
                     // 客户端主动关闭 (TCP FIN)
                     cleanup_data_connection(i, j);
-                } 
-                else 
+                }
+                else
                 {
                     // n < 0
                     // 理论上，因为我们用了 select()，不应再收到 EWOULDBLOCK。
                     // 但为健壮性，我们仍然检查：忽略 EWOULDBLOCK，其他视为错误。
-                    if (errno != EWOULDBLOCK && errno != EAGAIN) 
+                    if (errno != EWOULDBLOCK && errno != EAGAIN)
                     {
                         // 发生真实错误 (如 RST)
                         cleanup_data_connection(i, j);
@@ -303,8 +333,6 @@ void run_net_recv(void)
         }
     }
 }
-
-
 
 unsigned char temp_buffer_net_tx[TX_NET_SIZE]; // 使用更小的块大小
 
@@ -316,6 +344,7 @@ unsigned char temp_buffer_net_tx[TX_NET_SIZE]; // 使用更小的块大小
 void run_net_send(void)
 {
     int i, j;
+    uint64_t now_us = net_send_now_us();
     fd_set writefds;
     int max_fd = 0;
     int has_fds = 0;
@@ -327,23 +356,51 @@ void run_net_send(void)
     // 1. 构建全局 fd_set，收集所有有数据要发的通道的可写 fd
     for (i = 0; i < NUM_PORTS; i++)
     {
-        ChannelState* channel = &g_system_config.channels[i];
+        ChannelState *channel = &g_system_config.channels[i];
+        ring_buffer_size_t pending = ring_buffer_num_items(&channel->buffer_uart);
 
-        if (channel->data_net_info.num_clients == 0 || ring_buffer_is_empty(&channel->buffer_uart))
+        has_data[i] = 0;
+
+        if (channel->data_net_info.num_clients == 0 || pending == 0)
         {
-            has_data[i] = 0;
+            if (i == NET_SEND_TEST_CHANNEL)
+            {
+                s_net_send_first_us[i] = 0;
+                s_net_send_retry_immediately[i] = 0;
+            }
             continue;
+        }
+
+        /* 仅对 UART0 单客户连接启用 64B/1ms 聚合发送。 */
+        if (i == NET_SEND_TEST_CHANNEL && channel->data_net_info.num_clients == 1)
+        {
+            if (s_net_send_first_us[i] == 0)
+            {
+                s_net_send_first_us[i] = now_us;
+            }
+
+            if (!s_net_send_retry_immediately[i] &&
+                pending < NET_SEND_BATCH_SIZE &&
+                now_us - s_net_send_first_us[i] < NET_SEND_MAX_WAIT_US)
+            {
+                continue;
+            }
+        }
+        else if (i == NET_SEND_TEST_CHANNEL)
+        {
+            s_net_send_first_us[i] = 0;
+            s_net_send_retry_immediately[i] = 0;
         }
 
         has_data[i] = 1;
 
-        for (j = 0; j < channel->data_net_info.num_clients; j++) 
+        for (j = 0; j < channel->data_net_info.num_clients; j++)
         {
             int fd = channel->data_net_info.client_fds[j];
             if (fd >= 0)
             {
                 FD_SET(fd, &writefds);
-                if (fd > max_fd) 
+                if (fd > max_fd)
                 {
                     max_fd = fd;
                 }
@@ -352,7 +409,7 @@ void run_net_send(void)
         }
     }
 
-    if (!has_fds) 
+    if (!has_fds)
         return;
 
     // 2. 一次性非阻塞地检查所有写集合
@@ -362,12 +419,12 @@ void run_net_send(void)
         return; // 没有任何 fd 可写 (ret=0) 或 select 错误 (ret<0)
 
     // 3. 仅对有 fd 可写的通道，从缓冲区取数据并发送
-    for (i = 0; i < NUM_PORTS; i++) //NUM_PORTS
+    for (i = 0; i < NUM_PORTS; i++) // NUM_PORTS
     {
         if (!has_data[i])
             continue;
 
-        ChannelState* channel = &g_system_config.channels[i];
+        ChannelState *channel = &g_system_config.channels[i];
 
         // 检查该通道是否有 fd 在可写集合中
         int any_writable = 0;
@@ -384,66 +441,103 @@ void run_net_send(void)
         if (!any_writable)
             continue;
 
+        /*
+         * UART0 单客户实验路径：先预读，send()成功后再按实际
+         * 发送字节数消费；短写或EAGAIN时下一轮立即重试。
+         */
+        if (i == NET_SEND_TEST_CHANNEL && channel->data_net_info.num_clients == 1)
+        {
+            int fd = channel->data_net_info.client_fds[0];
+            unsigned int bytes_to_send;
+            int sent;
+
+            if (fd < 0 || !FD_ISSET(fd, &writefds))
+            {
+                continue;
+            }
+
+            bytes_to_send = ring_buffer_peek_arr(&channel->buffer_uart,
+                                                 (char *)temp_buffer_net_tx,
+                                                 TX_NET_SIZE);
+            if (bytes_to_send == 0)
+            {
+                s_net_send_first_us[i] = 0;
+                s_net_send_retry_immediately[i] = 0;
+                continue;
+            }
+
+            sent = send(fd, (char *)temp_buffer_net_tx, bytes_to_send, 0);
+
+            if (sent > 0)
+            {
+                /* ============ 临时添加 ============ */
+                // printf("[NET TX] Port=%d, fd=%d, len=%d, data=", i + 1, fd, sent);
+                // for (int k = 0; k < sent; k++)
+                // {
+                //     printf("%02X ", (unsigned char)temp_buffer_net_tx[k]);
+                // }
+                // printf("\n");
+                /* ================================ */
+
+                ring_buffer_discard(&channel->buffer_uart, (ring_buffer_size_t)sent);
+                channel->rx_net += (unsigned int)sent;
+
+                if (ring_buffer_is_empty(&channel->buffer_uart))
+                {
+                    s_net_send_first_us[i] = 0;
+                    s_net_send_retry_immediately[i] = 0;
+                }
+                else if ((unsigned int)sent < bytes_to_send)
+                {
+                    s_net_send_retry_immediately[i] = 1;
+                }
+                else
+                {
+                    s_net_send_first_us[i] = net_send_now_us();
+                    s_net_send_retry_immediately[i] = 0;
+                }
+            }
+            else if (sent == 0 || errno == EWOULDBLOCK || errno == EAGAIN)
+            {
+                s_net_send_retry_immediately[i] = 1;
+            }
+            else
+            {
+                cleanup_data_connection(i, 0);
+            }
+
+            continue;
+        }
+
         // 从环形缓冲区读取一小块数据
-        unsigned int bytes_to_send = ring_buffer_dequeue_arr(&channel->buffer_uart, (char*)temp_buffer_net_tx, TX_NET_SIZE);
+        unsigned int bytes_to_send = ring_buffer_dequeue_arr(&channel->buffer_uart, (char *)temp_buffer_net_tx, TX_NET_SIZE);
 
         if (bytes_to_send > 0)
         {
             channel->rx_net += bytes_to_send;
 
             // 将数据发送给所有可写的客户端
-            for (j = channel->data_net_info.num_clients - 1; j >= 0; j--) 
+            for (j = channel->data_net_info.num_clients - 1; j >= 0; j--)
             {
                 int fd = channel->data_net_info.client_fds[j];
 
                 if (fd >= 0 && FD_ISSET(fd, &writefds))
                 {
-                    int sent = send(fd, (char*)temp_buffer_net_tx, bytes_to_send, 0);
-                    // 可删除
-channel->tcp_send_requested_bytes += bytes_to_send;
+                    int sent = send(fd, (char *)temp_buffer_net_tx, bytes_to_send, 0);
 
-if (sent > 0)
-{
-    channel->tcp_send_actual_bytes +=
-        (unsigned int)sent;
+                    /*================= 临时添加 ================*/
+                    if (sent > 0)
+                    {
+                        // printf("[NET TX] Port=%d, fd=%d, len=%d, data=", i + 1, fd, sent);
+                        // for (int k = 0; k < sent; k++)
+                        // {
+                        //     printf("%02X ", (unsigned char)temp_buffer_net_tx[k]);
+                        // }
+                        // printf("\n");
+                    }
+                    /*=================================*/
 
-    if ((unsigned int)sent < bytes_to_send)
-    {
-        channel->tcp_short_write_count++;
-
-        channel->tcp_unsent_bytes +=
-            bytes_to_send - (unsigned int)sent;
-    }
-}
-else if (sent == 0)
-{
-    channel->tcp_short_write_count++;
-    channel->tcp_unsent_bytes += bytes_to_send;
-}
-else
-{
-    channel->tcp_unsent_bytes += bytes_to_send;
-
-    if (errno == EWOULDBLOCK ||
-        errno == EAGAIN)
-    {
-        channel->tcp_send_eagain_count++;
-    }
-    else
-    {
-        channel->tcp_send_error_count++;
-    }
-}
-/*** */
-                    // if (sent > 0)
-                    // {
-                        // 环回测试：计算并打印延迟
-                        //clock_gettime(CLOCK_MONOTONIC, &t_loopback_end);
-                        //struct timespec diff = diff_timespec(t_loopback_start, t_loopback_end);
-                        //unsigned long us = diff.tv_sec * 1000000 + diff.tv_nsec / 1000;
-                        //printf("==== loopback delay: %ld us ====\n", us);
-                    // }
-                    if (sent < 0) 
+                    if (sent < 0)
                     {
                         if (errno != EWOULDBLOCK && errno != EAGAIN)
                         {
@@ -461,60 +555,75 @@ else
  */
 static void cleanup_data_connection(int channel_index, int client_index_in_array)
 {
-	semTake(g_config_mutex, WAIT_FOREVER);
-	ChannelState* channel = &g_system_config.channels[channel_index];
-	if (client_index_in_array < 0 || client_index_in_array >= channel->data_net_info.num_clients)
-	{
-		semGive(g_config_mutex);
-		return;
-	}
+    semTake(g_config_mutex, WAIT_FOREVER);
+    ChannelState *channel = &g_system_config.channels[channel_index];
+    if (client_index_in_array < 0 || client_index_in_array >= channel->data_net_info.num_clients)
+    {
+        semGive(g_config_mutex);
+        return;
+    }
 
-	int fd_to_close = channel->data_net_info.client_fds[client_index_in_array];
-	close(fd_to_close);
+    int fd_to_close = channel->data_net_info.client_fds[client_index_in_array];
+    close(fd_to_close);
 
-	int last_index = channel->data_net_info.num_clients - 1;
-	if (client_index_in_array != last_index) 
-	{
-		channel->data_net_info.client_fds[client_index_in_array] = channel->data_net_info.client_fds[last_index];
-	}
-	channel->data_net_info.client_fds[last_index] = -1;
-	channel->data_net_info.num_clients--;
+    int last_index = channel->data_net_info.num_clients - 1;
+    if (client_index_in_array != last_index)
+    {
+        channel->data_net_info.client_fds[client_index_in_array] = channel->data_net_info.client_fds[last_index];
+    }
+    channel->data_net_info.client_fds[last_index] = -1;
+    channel->data_net_info.num_clients--;
 
-	// 更新全局TCP连接计数
-	extern int g_active_tcp_connections[NUM_PORTS];
-	if (g_active_tcp_connections[channel_index] > 0) 
-	{
-		g_active_tcp_connections[channel_index]--;
-		LOG_DEBUG("NetScheduler: Ch %d g_active_tcp_connections decreased to %d\n", 
-		          channel_index, g_active_tcp_connections[channel_index]);
-	}
+    // 更新全局TCP连接计数
+    extern int g_active_tcp_connections[NUM_PORTS];
+    if (g_active_tcp_connections[channel_index] > 0)
+    {
+        g_active_tcp_connections[channel_index]--;
+        LOG_DEBUG("NetScheduler: Ch %d g_active_tcp_connections decreased to %d\n",
+                  channel_index, g_active_tcp_connections[channel_index]);
+    }
 
-	if (channel->data_net_info.num_clients == 0) 
-	{
-		// 最后一个客户端断开，状态从 CONNECTED 变回 LISTENING
-		channel->data_net_info.state = NET_STATE_LISTENING;
-		channel->uart_state = UART_STATE_CLOSED;
-		// channel->tx_net = 0;
-		// channel->rx_net = 0;
-		// channel->rx_count = 0;
-		// channel->tx_count = 0;
-        
-        // 可删除---删除前记得解开下面两行代码的注释
-		// ring_buffer_init(&channel->buffer_net,  channel->net_buffer_mem,  RING_BUFFER_SIZE);
-		// ring_buffer_init(&channel->buffer_uart, channel->uart_buffer_mem, RING_BUFFER_SIZE);
-        ring_buffer_reset(&channel->buffer_net);
+    if (channel->data_net_info.num_clients == 0)
+    {
+        // 最后一个客户端断开，状态从 CONNECTED 变回 LISTENING
+        channel->data_net_info.state = NET_STATE_LISTENING;
+        // channel->tx_net = 0;
+        // channel->rx_net = 0;
+        // channel->rx_count = 0;
+        // channel->tx_count = 0;
+
+        /* 已无网络接收者，UART->NET 的残留数据可以丢弃。 */
         ring_buffer_reset(&channel->buffer_uart);
-        /**/
 
-		/* 检查命令通道是否也无连接 */
-		if (channel->cmd_net_info.num_clients == 0) {
-			channel->is_connected = PORT_CONNECT_NONE;
-		}
-		LOG_INFO("NetScheduler: Ch %d has no clients left. State -> LISTENING.\n", channel_index);
-	}
-	semGive(g_config_mutex);
+        /*
+         * TCP FIN 可能紧跟在最后一批数据之后到达。此时不能立即关闭 UART
+         * 或清空 buffer_net，否则尚未写入 UART 的数据会丢失。
+         */
+        if (channel->interface_type != INTERFACE_TYPE_RS485_RX &&
+            channel->uart_state == UART_STATE_OPENED &&
+            (!ring_buffer_is_empty(&channel->buffer_net) ||
+             !axi16550_Tx_IDLE(channel_index)))
+        {
+            LOG_INFO("NetScheduler: Ch %d client disconnected; "
+                     "waiting for UART TX drain, pending=%zu.\n",
+                     channel_index,
+                     ring_buffer_num_items(&channel->buffer_net));
+        }
+        else
+        {
+            channel->uart_state = UART_STATE_CLOSED;
+            ring_buffer_reset(&channel->buffer_net);
+        }
+
+        /* 检查命令通道是否也无连接 */
+        if (channel->cmd_net_info.num_clients == 0)
+        {
+            channel->is_connected = PORT_CONNECT_NONE;
+        }
+        LOG_INFO("NetScheduler: Ch %d has no clients left. State -> LISTENING.\n", channel_index);
+    }
+    semGive(g_config_mutex);
 }
-
 
 /**
  * @brief 用于独立测试网络调度器的任务入口函数
@@ -527,7 +636,7 @@ static void cleanup_data_connection(int channel_index, int client_index_in_array
  */
 void NetSchedulerTestTask_Entry(void)
 {
-    LOG_INFO("----> Starting independent Network Scheduler Test Task (tNetSchedTest)...\\n", 0,0,0,0,0,0);
+    LOG_INFO("----> Starting independent Network Scheduler Test Task (tNetSchedTest)...\\n", 0, 0, 0, 0, 0, 0);
     printf("NetSchedulerTestTask_Entry... \r\n");
     taskDelay(1);
 
@@ -537,11 +646,10 @@ void NetSchedulerTestTask_Entry(void)
         NetworkSchedulerTask();
 
         // 延时，让出 CPU，控制任务执行频率
-        //taskDelay(sysClkRateGet()/800); // 大约每 1.25ms 执行一次
+        // taskDelay(sysClkRateGet()/800); // 大约每 1.25ms 执行一次
         taskDelay(1); // 大约每 1.25ms 执行一次
     }
 }
-
 
 static int is_locked_port_client_allowed(int channel_index, int client_fd)
 {

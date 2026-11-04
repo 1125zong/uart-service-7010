@@ -579,7 +579,17 @@ void dev_config_load_defaults(void)
 	if (semTake(g_config_mutex, WAIT_FOREVER) == OK)
 	{
 		int i = 0;
+		unsigned long long tx_totals[NUM_PORTS];
+		unsigned long long rx_totals[NUM_PORTS];
 		// --- 进入临界区 ---
+
+		/* 恢复默认配置时保留本次启动以来的串口累计计数。 */
+		semTake(g_stats_mutex, WAIT_FOREVER);
+		for (i = 0; i < NUM_PORTS; i++)
+		{
+			tx_totals[i] = g_system_config.channels[i].tx_total_count;
+			rx_totals[i] = g_system_config.channels[i].rx_total_count;
+		}
 
 		// 清空整个结构体
 		memset(&g_system_config, 0, sizeof(SystemConfiguration));
@@ -591,7 +601,10 @@ void dev_config_load_defaults(void)
 		for (i = 0; i < NUM_PORTS; i++)
 		{
 			dev_config_init_channel_defaults(&g_system_config.channels[i], i);
+			g_system_config.channels[i].tx_total_count = tx_totals[i];
+			g_system_config.channels[i].rx_total_count = rx_totals[i];
 		}
+		semGive(g_stats_mutex);
 
 		strncpy(dev->model_name, DEVICE_MODEL_NAME, MAX_MODEL_NAME_LEN);
 		dev->serial_no = serial_no_pack(DEVICE_SERIAL_NO_YEAR, DEVICE_SERIAL_NO_MONTH, DEVICE_SERIAL_NO_DAY, DEVICE_NUMBER);

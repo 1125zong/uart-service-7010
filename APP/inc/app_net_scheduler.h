@@ -2,13 +2,9 @@
 #ifndef APP_NET_SCHEDULER_H
 #define APP_NET_SCHEDULER_H
 
-
-
-
-
 void NetworkSchedulerTask(void);
 
-// лМ╪сртобиЫцВсцсз╡Бйт
+// О©╫О©╫О©╫О©╫О©╫О©╫О©╫О©╫О©╫О©╫О©╫О©╫О©╫О©╫О©╫з╡О©╫О©╫О©╫
 void NetSchedulerTestTask_Entry(void);
 
 #endif

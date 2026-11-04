@@ -19,6 +19,8 @@
   
 extern volatile void* pl_uart_screen_base_addr;    // For PL_AXI_UART_BASE (0x41220000)
  
+// 临时
+// #define         AXI_UART_CLK	                   (117964800)
 #define         AXI_UART_CLK	                   (29491200)
 #define         AXI_UART_RBR(x) 				   ( (volatile uint32_t )(pl_uart_screen_base_addr ) + x*0x2000 + 0x00001000)
 #define	        AXI_UART_THR(x) 				   ( (volatile uint32_t )(pl_uart_screen_base_addr ) + x*0x2000 + 0x00001000)

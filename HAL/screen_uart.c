@@ -28,16 +28,6 @@ static int32_t axiUartInit(uint8_t Channel,uint32_t Baudrate)
     
     // printf("Channel: %d\n", Channel);
     div = AXI_UART_CLK/16/Baudrate;
-    
-    /* 临时添加 */
-    // printf("UART channel=%u, clk=%u, baud=%u, div=%u, DLM=0x%02X, DLL=0x%02X\n",
-    //    Channel,
-    //    AXI_UART_CLK,
-    //    Baudrate,
-    //    div,
-    //    (div >> 8) & 0xFF,
-    //    div & 0xFF);
-    /*************/
 
     dlm = (div>>8)&0xFF;
     dll = div&0xFF;

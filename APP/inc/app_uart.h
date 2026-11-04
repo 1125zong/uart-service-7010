@@ -55,6 +55,8 @@
 #define MCR_LOOP             0x10  /* Loopback mode enable bit */
 
 /* Function prototypes */
+int uart_set_interface_type(unsigned int channel, uint8_t interface_type);
+
 int socket_send_to_middle(int sock_fd, char *buf, int buf_len);
 int init_usart(ChannelState *uart_instance, int client_socket, char *buf,int buf_len, int channel);
 int usart_set_baudrate(ChannelState *uart_instance, int client_socket,char *buf, int buf_len, int channel);

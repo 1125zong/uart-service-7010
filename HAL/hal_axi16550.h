@@ -65,7 +65,9 @@ typedef enum{
 /* Base addresses and register offsets */
 #define AXI_UART_BASE(n)         ((int32_t)pl_uart_base_addr + 0x2000 * n) /* ����ַ */
 #define AXI_16550_INT            (84)
-#define AXI_16550_CLK            (29491200) //29491200
+// 临时
+// #define AXI_16550_CLK            (117964800) //117964800
+#define AXI_16550_CLK            (29491200)
 #define AXI_16550_CLK1           (32000000)
 #define AXI_16550_RBR            (0x1000)
 #define AXI_16550_THR            (0x1000)
@@ -138,6 +140,9 @@ int axi16550FIFOInit(int port);
 void FPGA_Info_Read(void);
 void axi16550CheckSelfInit(unsigned int channel, unsigned int baud);
 int port_mirror_apply(unsigned char port, unsigned char direction);
+
+int axi16550_Tx_IDLE(unsigned int channel);
+uint8_t axi16550TypeSet(UART_TYPE uart_type, unsigned int channel);
 
 uint8_t UART_TX_FIFO_Ready(uint8_t channel);
 #endif /* AXI_16550_H_ */

@@ -58,23 +58,11 @@ struct ring_buffer_t
     ring_buffer_size_t tail_index;
     /** Index of head. */
     ring_buffer_size_t head_index;
-
-    /*可删除*/
-
-    ring_buffer_size_t max_used;
-    uint64_t overwrite_bytes;
-    /********************* */
 };
 
-/*可删除*/
-ring_buffer_size_t ring_buffer_num_items(ring_buffer_t *buffer);
-ring_buffer_size_t ring_buffer_get_max_used(const ring_buffer_t *buffer);
-uint64_t ring_buffer_get_overwrite_bytes(const ring_buffer_t *buffer);
-/* 只清空数据，不清除累计统计 */
-void ring_buffer_reset(ring_buffer_t *buffer);
+ring_buffer_size_t ring_buffer_num_items( ring_buffer_t *buffer);
 
-/*************/
-
+void ring_buffer_reset( ring_buffer_t *buffer);
 
 /**
  * Initializes the ring buffer pointed to by <em>buffer</em>.
@@ -126,6 +114,20 @@ ring_buffer_size_t ring_buffer_dequeue_arr(ring_buffer_t *buffer, char *data, ri
  */
 uint8_t ring_buffer_peek(ring_buffer_t *buffer, char *data, ring_buffer_size_t index);
 
+/**
+ * 批量读取环形缓冲区数据，但不移动读指针。
+ *
+ * @return 实际复制的字节数。
+ */
+ring_buffer_size_t ring_buffer_peek_arr(ring_buffer_t *buffer, char *data, ring_buffer_size_t len);
+
+/**
+ * 从环形缓冲区丢弃指定数量的数据，即推进读指针。
+ *
+ * @return 实际丢弃的字节数。
+ */
+ring_buffer_size_t ring_buffer_discard(ring_buffer_t *buffer, ring_buffer_size_t len);
+/**/
 
 uint8_t ring_buffer_is_empty(ring_buffer_t *buffer);
 uint8_t ring_buffer_is_full(ring_buffer_t *buffer);

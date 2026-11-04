@@ -144,6 +144,7 @@ extern MSG_Q_ID g_config_conn_q;
 
 // 互斥锁ID
 extern SEM_ID g_config_mutex;
+extern SEM_ID g_stats_mutex;
 
 // 任务ID
 extern TASK_ID g_conn_manager_tid;

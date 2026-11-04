@@ -11,75 +11,58 @@
  */
 #include "app_com.h"
 #include "screen_uart.h"
-//#include <timers.h>     // For POSIX timers if used as fallback, or custom timer driver header
-//#include <intLib.h>     // For intConnect()
-#include <stdint.h>     // For uint8_t, uint32_t, etc.
-#include <time.h>       // For time() function
-#include<stdio.h>
+// #include <timers.h>     // For POSIX timers if used as fallback, or custom timer driver header
+// #include <intLib.h>     // For intConnect()
+#include <stdint.h> // For uint8_t, uint32_t, etc.
+#include <time.h>   // For time() function
+#include <stdio.h>
 
-//#include<timer.h>
+// #include<timer.h>
 
 /* ------------------ Task-Specific Constants ------------------ */
-#define MEDIUM_FREQ_INTERVAL     (1)          // 中频任务执行间隔 (10 * 100µs = ms)
-#define LOW_FREQ_INTERVAL        (5*1000)     // 任务执行间隔 (1000ms)
+#define MEDIUM_FREQ_INTERVAL (1)     // 中频任务执行间隔 (10 * 100µs = ms)
+#define LOW_FREQ_INTERVAL (5 * 1000) // 任务执行间隔 (1000ms)
 
 #define TX_CHUNK_SIZE (UART_HW_FIFO_SIZE) / 2
 
 // LED每次触发后点亮的持续时间（单位：秒）
-#define LED_ON_DURATION_SECONDS    (2) 
+#define LED_ON_DURATION_SECONDS (2)
 
-//函数声明
+// 函数声明
 extern void NetworkSchedulerTask(void);
 extern void check_for_new_connections(void);
 extern void run_net_recv(void);
 extern void run_net_send(void);
 
 /* ------------------ Private Function Prototypes ------------------ */
-//static void high_precision_timer_isr(uint32_t timer_id, void *arg);
+// static void high_precision_timer_isr(uint32_t timer_id, void *arg);
 static int setup_high_precision_timer(void);
 
 static void handle_serial_tx_rx(void);
 static void handle_led_blinking(void);
 static void run_medium_frequency_tasks(void);
-//static void run_low_frequency_tasks(void);
-
-// 可删除
-static void print_port0_diagnostics(void);
-
-static uint64_t s_uart0_tx_ready_count = 0;
-static uint64_t s_uart0_tx_not_ready_count = 0;
-
-static uint64_t s_uart0_last_batch_ns = 0;
-static uint64_t s_uart0_batch_interval_us = 0;
-
-static uint64_t s_uart0_write_time_us = 0;
-static uint64_t s_uart0_write_time_max_us = 0;
-
-static uint64_t timespec_to_ns(const struct timespec *ts);
-/**/
+// static void run_low_frequency_tasks(void);
 
 /* ------------------ Module-level static variables ------------------ */
 static SEM_ID s_timer_sync_sem; // 用于定时器ISR与任务同步的二进制信号量
 static volatile uint32_t timer_cnt = 0;
 
-static uint32_t s_last_rx_count[NUM_PORTS] = {0};
-static uint32_t s_last_tx_count[NUM_PORTS] = {0};
-static time_t s_last_rx_led_time[NUM_PORTS] = {0};  // 存储RX LED最后活动时间戳
-static time_t s_last_tx_led_time[NUM_PORTS] = {0};  // 存储TX LED最后活动时间戳
-/* -- UART 环回延迟测量 -- */
-static struct timespec t_uart_tx, t_uart_rx;
-static int uart_test_ready = 0;
+static uint64_t s_last_rx_count[NUM_PORTS] = {0};
+static uint64_t s_last_tx_count[NUM_PORTS] = {0};
+static time_t s_last_rx_led_time[NUM_PORTS] = {0}; // 存储RX LED最后活动时间戳
+static time_t s_last_tx_led_time[NUM_PORTS] = {0}; // 存储TX LED最后活动时间戳
+
 /* ------------------ Global Variable Definitions ------------------ */
 
 void printHex(const char *buffer, size_t size);
 
 void printHex(const char *buffer, size_t size)
 {
-	size_t i;
+    size_t i;
     for (i = 0; i < size; ++i)
     {
-        //每16个字节换行
-        if (i > 0 && i % 16 == 0) 
+        // 每16个字节换行
+        if (i > 0 && i % 16 == 0)
         {
             printf("\r\n");
         }
@@ -111,21 +94,26 @@ void high_precision_timer_isr(uint32_t timer_id, void *arg)
 #endif
 void uart_test()
 {
-    uint8_t i=0;
-    uint32_t j=0;
-    const char test_data[] = {0,1,2,3,4,5,6,7,8,9};
-    for (i = 0; i < NUM_PORTS; i++) {
+    uint8_t i = 0;
+    uint32_t j = 0;
+    const char test_data[] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9};
+    for (i = 0; i < NUM_PORTS; i++)
+    {
         // Initialize UART with default settings
-        if (sysUartInit(i, 115200) == 0) {
-            ChannelState* channel = &g_system_config.channels[i];
+        if (sysUartInit(i, 115200) == 0)
+        {
+            ChannelState *channel = &g_system_config.channels[i];
             channel->uart_state = UART_STATE_OPENED;
             // send data
             channel->tx_net = 0;
-            for(j=0;j<115200/100;j++){
-                ring_buffer_queue_arr(&channel->buffer_net,(const char*) test_data,sizeof(test_data));
+            for (j = 0; j < 115200 / 100; j++)
+            {
+                ring_buffer_queue_arr(&channel->buffer_net, (const char *)test_data, sizeof(test_data));
                 channel->tx_net += sizeof(test_data);
             }
-        } else {
+        }
+        else
+        {
             printf("Failed to initialize UART %d\n", i);
         }
     }
@@ -139,20 +127,24 @@ void delay_nus(unsigned int nus)
     struct timespec ts;
     // 100 微秒 = 0 秒 + 100000 纳秒
     ts.tv_sec = 0;
-    ts.tv_nsec = nus * 1000;  // 100us = 100000ns
+    ts.tv_nsec = nus * 1000; // 100us = 100000ns
 
     // 执行延时，被信号中断自动重试（保证延时准确）
-    while (nanosleep(&ts, &ts) == -1);
+    while (nanosleep(&ts, &ts) == -1)
+        ;
 }
 
 // 用来把时间差转成 秒/毫秒/微秒/纳秒
 struct timespec diff_timespec(struct timespec start, struct timespec end)
 {
     struct timespec temp;
-    if ((end.tv_nsec - start.tv_nsec) < 0) {
+    if ((end.tv_nsec - start.tv_nsec) < 0)
+    {
         temp.tv_sec = end.tv_sec - start.tv_sec - 1;
         temp.tv_nsec = 1000000000 + end.tv_nsec - start.tv_nsec;
-    } else {
+    }
+    else
+    {
         temp.tv_sec = end.tv_sec - start.tv_sec;
         temp.tv_nsec = end.tv_nsec - start.tv_nsec;
     }
@@ -164,39 +156,35 @@ struct timespec start, end, diff;
 /**
  * @brief RealTimeSchedulerTask 的主入口函数
  */
-void* RealTimeSchedulerTask(void *arg)
-{  
-	LOG_INFO("RealTimeSchedulerTask: Starting...\n");
+void *RealTimeSchedulerTask(void *arg)
+{
+    LOG_INFO("RealTimeSchedulerTask: Starting...\n");
 
     int ret = pthread_setname_np(pthread_self(), "RealTimeTask");
-    if(ret != 0)
+    if (ret != 0)
     {
         LOG_ERROR("RealTimeSchedulerTask: set thread name failed: %s\n", strerror(ret));
         return NULL;
     }
 
-	/* ------------------ 主调度循环 ------------------ */
-	uint32_t loop_cnt = 0;
-	while (1) 
-	{
+    /* ------------------ 主调度循环 ------------------ */
+    uint32_t loop_cnt = 0;
+    while (1)
+    {
         check_for_new_connections();
-        run_net_recv();
 
+        run_net_recv();
         /* 串口收发：每通道先 TX 再 RX，一站处理完 */
         handle_serial_tx_rx();
-
         run_net_send();
-        // 可删除
-        print_port0_diagnostics();
-        /**/
 
         /* LED 每 100 个周期执行一次，减少 time() 系统调用 */
-        if (++loop_cnt >= 100) 
+        if (++loop_cnt >= 100)
         {
             handle_led_blinking();
             loop_cnt = 0;
         }
-	}
+    }
 
     return NULL;
 }
@@ -213,193 +201,78 @@ static void handle_serial_tx_rx(void)
     int i;
     for (i = 0; i < NUM_PORTS; i++)
     {
-        ChannelState* channel = &g_system_config.channels[i];
-        if (channel->data_net_info.num_clients == 0 || channel->uart_state != UART_STATE_OPENED)
+        ChannelState *channel = &g_system_config.channels[i];
+        if (channel->uart_state != UART_STATE_OPENED)
             continue;
 
         /* --- TX: buffer_net → UART --- */
-        // if (!ring_buffer_is_empty(&channel->buffer_net) && axi16550_TxReady(i))
-        // {
-        //     uint32_t bytes_count = ring_buffer_dequeue_arr(&channel->buffer_net, (char*)temp_buffer, TX_CHUNK_SIZE);
-        //     if (bytes_count > 0)
-        //     {
-        //         channel->tx_count += bytes_count;
-        //         /* 记录 UART TX 起始时间 */
-        //         //clock_gettime(CLOCK_MONOTONIC, &t_uart_tx);
+        uint32_t bytes_count = 0;
+        int tx_ok = 0;
 
-                
-        //         /*  临时添加  */
-        //         LOG_DEBUG("[UART TX] Port=%d, len=%u, data=%02X, LSR=%02X, MCR=%02X\n",
-        //                                     i + 1, bytes_count, temp_buffer[0],
-        //                                     userAxiCfgRead(i, AXI_16550_LSR) & 0xFF,
-        //                                     userAxiCfgRead(i, AXI_16550_MCR) & 0xFF);
-        //         /**********/
-
-
-        //         uart_test_ready = 1;
-        //         axi16550SendNoWait(i, temp_buffer, bytes_count);
-        //     }
-        // }
-
-        /*可删除 -------- 删除前开启上面的if逻辑块*/
-        if (!ring_buffer_is_empty(&channel->buffer_net))
-{
-    int tx_ready = axi16550_TxReady(i);
-
-    /*
-     * 只统计UART0，并且只在buffer_net有数据等待时统计。
-     * 缓冲区为空时不计入NOT_READY。
-     */
-    if (i == 0)
-    {
-        if (tx_ready)
+        if (semTake(g_config_mutex, NO_WAIT) == OK)
         {
-            s_uart0_tx_ready_count++;
-        }
-        else
-        {
-            s_uart0_tx_not_ready_count++;
-        }
-    }
-
-    if (tx_ready)
-    {
-        uint32_t bytes_count;
-
-        bytes_count = ring_buffer_dequeue_arr(
-            &channel->buffer_net,
-            (char *)temp_buffer,
-            TX_CHUNK_SIZE);
-
-        if (bytes_count > 0)
-        {
-            uint64_t write_start_ns = 0;
-
-            if (i == 0)
+            if (channel->interface_type != INTERFACE_TYPE_RS485_RX &&
+                !ring_buffer_is_empty(&channel->buffer_net) &&
+                axi16550_TxReady(i))
             {
-                struct timespec submit_ts;
+                bytes_count = ring_buffer_dequeue_arr(&channel->buffer_net, (char *)temp_buffer, TX_CHUNK_SIZE);
+                // printf("[uart%d]:tx_cont: %d\n",i, bytes_count);
 
-                clock_gettime(
-                    CLOCK_MONOTONIC,
-                    &submit_ts);
-
-                write_start_ns =
-                    timespec_to_ns(&submit_ts);
-
-                if (s_uart0_last_batch_ns != 0)
-                {
-                    s_uart0_batch_interval_us =
-                        (write_start_ns -
-                         s_uart0_last_batch_ns) /
-                        1000ULL;
-                }
-
-                s_uart0_last_batch_ns =
-                    write_start_ns;
+                if (bytes_count > 0)
+                    tx_ok = (axi16550SendNoWait(i, temp_buffer, bytes_count) == 0);
             }
+            semGive(g_config_mutex);
+        }
 
+        if (tx_ok)
+        {
+            semTake(g_stats_mutex, WAIT_FOREVER);
             channel->tx_count += bytes_count;
-            uart_test_ready = 1;
-
-            axi16550SendNoWait(
-                i,
-                temp_buffer,
-                bytes_count);
-
-            if (i == 0)
-            {
-                struct timespec write_end_ts;
-                uint64_t write_end_ns;
-
-                clock_gettime(
-                    CLOCK_MONOTONIC,
-                    &write_end_ts);
-
-                write_end_ns =
-                    timespec_to_ns(
-                        &write_end_ts);
-
-                s_uart0_write_time_us =
-                    (write_end_ns -
-                     write_start_ns) /
-                    1000ULL;
-
-                if (s_uart0_write_time_us >
-                    s_uart0_write_time_max_us)
-                {
-                    s_uart0_write_time_max_us =
-                        s_uart0_write_time_us;
-                }
-            }
+            channel->tx_total_count += bytes_count;
+            semGive(g_stats_mutex);
         }
-    }
-}
-        /**/
 
         /* --- RX: UART → buffer_uart --- */
         {
-            // uint32_t bytes_count = 0;
-            // if (axi16550Recv(i, temp_buffer, &bytes_count,
-            //                  &channel->frame_error_count,
-            //                  &channel->parity_error_count,
-            //                  &channel->overrun_error_count,
-            //                  &channel->break_count) == 0 && bytes_count > 0)
-            // {
-                
-
-
-                
-
-                
-
-            //     /* 计算 UART 环回延迟 */
-            //     if (uart_test_ready) {
-            //         //clock_gettime(CLOCK_MONOTONIC, &t_uart_rx);
-            //         struct timespec diff = diff_timespec(t_uart_tx, t_uart_rx);
-            //         unsigned long us = diff.tv_sec * 1000000 + diff.tv_nsec / 1000;
-            //         //printf("==== uart loopback delay: %ld us ====\n", us);
-            //         uart_test_ready = 0;
-            //     }
-
-            //     channel->rx_count += bytes_count;
-            //     ring_buffer_queue_arr(&channel->buffer_uart, (const char*)temp_buffer, bytes_count);
-            // }
-
-            // 可删除 ---- 删除前将上面的打开
             uint32_t bytes_count = 0;
-uint32_t frame_delta = 0;
-uint32_t parity_delta = 0;
-uint32_t overrun_delta = 0;
-uint32_t break_delta = 0;
-int recv_ret;
+            if (axi16550Recv(i, temp_buffer, &bytes_count,
+                             &channel->frame_error_count,
+                             &channel->parity_error_count,
+                             &channel->overrun_error_count,
+                             &channel->break_count) == 0 &&
+                bytes_count > 0)
+            {
+                //printf("[uart%d]:RX_cont: %d\n", i, bytes_count);
+                semTake(g_stats_mutex, WAIT_FOREVER);
+                channel->rx_count += bytes_count;
+                channel->rx_total_count += bytes_count;
+                semGive(g_stats_mutex);
+                if (channel->data_net_info.num_clients > 0)
+                {
+                    ring_buffer_queue_arr(&channel->buffer_uart, (const char *)temp_buffer, bytes_count);
+                }
+            }
+        }
 
-recv_ret = axi16550Recv(i,
-                        temp_buffer,
-                        &bytes_count,
-                        &frame_delta,
-                        &parity_delta,
-                        &overrun_delta,
-                        &break_delta);
-
-channel->frame_error_count += frame_delta;
-channel->parity_error_count += parity_delta;
-channel->overrun_error_count += overrun_delta;
-channel->break_count += break_delta;
-
-if (recv_ret == 0 && bytes_count > 0)
-{
-    channel->rx_count += bytes_count;
-
-    ring_buffer_queue_arr(
-        &channel->buffer_uart,
-        (const char *)temp_buffer,
-        bytes_count);
-}
-/**/
+        /*
+         * 最后一个数据客户端断开后，继续排空已经进入 buffer_net 的数据。
+         * 只有软件队列为空且 UART FIFO/移位寄存器均为空时，才关闭 UART。
+         */
+        if (semTake(g_config_mutex, NO_WAIT) == OK)
+        {
+            if (channel->data_net_info.num_clients == 0 &&
+                channel->uart_state == UART_STATE_OPENED &&
+                ring_buffer_is_empty(&channel->buffer_net) &&
+                axi16550_Tx_IDLE(i))
+            {
+                channel->uart_state = UART_STATE_CLOSED;
+                ring_buffer_reset(&channel->buffer_uart);
+                LOG_INFO("RealTimeScheduler: Ch %d UART TX drained. UART closed.\n", i);
+            }
+            semGive(g_config_mutex);
         }
     }
 }
-
 
 /**
  * @brief 执行所有高频（每个周期）任务
@@ -415,7 +288,6 @@ static void run_high_frequency_tasks(void)
 }
 #endif
 
-
 /**
  * @brief 新增：处理所有通道的LED闪烁逻辑
  * @details 基于可重入单稳态触发器模型。
@@ -426,23 +298,32 @@ static void run_high_frequency_tasks(void)
 static void handle_led_blinking(void)
 {
     int i;
-    static uint8_t s_last_rx_led_state[NUM_PORTS] = {0};  // 记住上次LED状态
-    static uint8_t s_last_tx_led_state[NUM_PORTS] = {0};  // 记住上次LED状态
+    static uint8_t s_last_rx_led_state[NUM_PORTS] = {0}; // 记住上次LED状态
+    static uint8_t s_last_tx_led_state[NUM_PORTS] = {0}; // 记住上次LED状态
     time_t current_time = time(NULL);
 
     for (i = 0; i < NUM_PORTS; i++)
     {
-        ChannelState* channel = &g_system_config.channels[i];
+        ChannelState *channel = &g_system_config.channels[i];
+        uint64_t rx_total, tx_total;
+        semTake(g_stats_mutex, WAIT_FOREVER);
+        rx_total = channel->rx_total_count;
+        tx_total = channel->tx_total_count;
+        semGive(g_stats_mutex);
         uint8_t current_rx_led_state = s_last_rx_led_state[i];
         uint8_t current_tx_led_state = s_last_tx_led_state[i];
 
         // --- 处理 RX LED ---
         // 1. 检测数据接收活动
-        if (channel->rx_count > s_last_rx_count[i])
+        if (rx_total > s_last_rx_count[i])
         {
-            s_last_rx_led_time[i] = current_time;  // 记录活动时间戳
-            s_last_rx_count[i] = channel->rx_count; // 更新上次的计数值
-            current_rx_led_state = 1; // 设置LED为点亮状态
+            s_last_rx_led_time[i] = current_time; // 记录活动时间戳
+            s_last_rx_count[i] = rx_total;        // 更新上次的计数值
+            current_rx_led_state = 1;             // 设置LED为点亮状态
+        }
+        else if (rx_total < s_last_rx_count[i])
+        {
+            s_last_rx_count[i] = rx_total;
         }
         else if (current_time - s_last_rx_led_time[i] >= LED_ON_DURATION_SECONDS)
         {
@@ -451,7 +332,7 @@ static void handle_led_blinking(void)
         }
 
         // 只在LED状态发生变化时才更新硬件状态
-        if (s_last_rx_led_state[i] != current_rx_led_state) 
+        if (s_last_rx_led_state[i] != current_rx_led_state)
         {
             // printf("rxport%d:%d\n", i, current_rx_led_state);
             rxled(i, current_rx_led_state);
@@ -460,11 +341,15 @@ static void handle_led_blinking(void)
 
         // --- 处理 TX LED ---
         // 1. 检测数据发送活动
-        if (channel->tx_count > s_last_tx_count[i])
+        if (tx_total > s_last_tx_count[i])
         {
-            s_last_tx_led_time[i] = current_time;  // 记录活动时间戳
-            s_last_tx_count[i] = channel->tx_count; // 更新上次的计数值
-            current_tx_led_state = 1; // 设置LED为点亮状态
+            s_last_tx_led_time[i] = current_time; // 记录活动时间戳
+            s_last_tx_count[i] = tx_total;        // 更新上次的计数值
+            current_tx_led_state = 1;             // 设置LED为点亮状态
+        }
+        else if (tx_total < s_last_tx_count[i])
+        {
+            s_last_tx_count[i] = tx_total;
         }
         else if (current_time - s_last_tx_led_time[i] >= LED_ON_DURATION_SECONDS)
         {
@@ -473,7 +358,7 @@ static void handle_led_blinking(void)
         }
 
         // 只在LED状态发生变化时才更新硬件状态
-        if (s_last_tx_led_state[i] != current_tx_led_state) 
+        if (s_last_tx_led_state[i] != current_tx_led_state)
         {
             // printf("txport%d:%d\n", i, current_tx_led_state);
             txled(i, current_tx_led_state);
@@ -493,14 +378,14 @@ static void run_medium_frequency_tasks(void)
 
 void channel_count_info(uint8_t channel_index)
 {
-    ChannelState* channel = &g_system_config.channels[channel_index];
+    ChannelState *channel = &g_system_config.channels[channel_index];
     LOG_FATAL("[%d]:rx_count= %d, tx_count= %d", channel_index, channel->rx_count, channel->tx_count);
-    LOG_FATAL("[%d]:rx_net  = %d, tx_net  = %d", channel_index, channel->rx_net,   channel->tx_net);
+    LOG_FATAL("[%d]:rx_net  = %d, tx_net  = %d", channel_index, channel->rx_net, channel->tx_net);
 }
 
 void channel_count_info_all(void)
 {
-	int i;
+    int i;
     for (i = 0; i < NUM_PORTS; i++)
     {
         channel_count_info(i);
@@ -509,8 +394,8 @@ void channel_count_info_all(void)
 
 void channel_buffer_cnt(uint8_t channel_index)
 {
-    //ChannelState* channel = &g_system_config.channels[channel_index];
-    //LOG_FATAL("[%d]:buffer_uart  = %d, buffer_net  = %d", channel_index, ring_buffer_num(&channel->buffer_uart), ring_buffer_num(&channel->buffer_net));
+    // ChannelState* channel = &g_system_config.channels[channel_index];
+    // LOG_FATAL("[%d]:buffer_uart  = %d, buffer_net  = %d", channel_index, ring_buffer_num(&channel->buffer_uart), ring_buffer_num(&channel->buffer_net));
 
     LOG_FATAL("[%d]\n", channel_index);
 }
@@ -526,21 +411,22 @@ void channel_buffer_cnt_all(void)
 
 void channel_count_clr(uint8_t channel_index)
 {
-    ChannelState* channel = &g_system_config.channels[channel_index];
+    ChannelState *channel = &g_system_config.channels[channel_index];
+    semTake(g_stats_mutex, WAIT_FOREVER);
     channel->tx_net = 0;
     channel->rx_net = 0;
     channel->rx_count = 0;
     channel->tx_count = 0;
+    semGive(g_stats_mutex);
 }
-
 
 void channel_count_clr_all(void)
 {
-    	int i;
+    int i;
     for (i = 0; i < NUM_PORTS; i++)
     {
         channel_count_clr(i);
-    } 
+    }
 }
 
 #if 0
@@ -566,19 +452,18 @@ void run_low_frequency_tasks(void)
 /**
  * @brief 设置并启动高精度硬件定时器
  */
-static int setup_high_precision_timer(void) 
+static int setup_high_precision_timer(void)
 {
-	int ret = 0;
-	//app_start_hz(1, 10000);
-	//app_register_task(high_precision_timer_isr, NULL);
-	ret = OK;
-	return ret;
+    int ret = 0;
+    // app_start_hz(1, 10000);
+    // app_register_task(high_precision_timer_isr, NULL);
+    ret = OK;
+    return ret;
 }
-
 
 void app_realtime_print(void)
 {
-	LOG_INFO("timer_cnt:%d \r\n",timer_cnt);
+    LOG_INFO("timer_cnt:%d \r\n", timer_cnt);
 }
 
 // 添加性能监控功能
@@ -589,221 +474,37 @@ static time_t s_last_print_time = 0;
 void app_realtime_performance_monitor(void)
 {
     time_t current_time = time(NULL);
-    if (current_time - s_last_print_time >= 5) { // 每5秒打印一次
+    if (current_time - s_last_print_time >= 5)
+    { // 每5秒打印一次
         unsigned long long current_total_rx = 0;
         unsigned long long current_total_tx = 0;
-        
+
         // 计算总收发数据量
-        for (int i = 0; i < NUM_PORTS; i++) {
-            current_total_rx += g_system_config.channels[i].rx_count;
-            current_total_tx += g_system_config.channels[i].tx_count;
+        semTake(g_stats_mutex, WAIT_FOREVER);
+        for (int i = 0; i < NUM_PORTS; i++)
+        {
+            current_total_rx += g_system_config.channels[i].rx_total_count;
+            current_total_tx += g_system_config.channels[i].tx_total_count;
         }
-        
+        semGive(g_stats_mutex);
+
         // 计算5秒内的数据量
-        unsigned long long rx_delta = current_total_rx - s_prev_total_rx;
-        unsigned long long tx_delta = current_total_tx - s_prev_total_tx;
-        
+        unsigned long long rx_delta = current_total_rx >= s_prev_total_rx
+                                          ? current_total_rx - s_prev_total_rx
+                                          : 0;
+        unsigned long long tx_delta = current_total_tx >= s_prev_total_tx
+                                          ? current_total_tx - s_prev_total_tx
+                                          : 0;
+
         // 计算平均速率
         double rx_rate = (double)rx_delta / 5.0;
         double tx_rate = (double)tx_delta / 5.0;
-        
-        LOG_INFO("Performance: RX: %.2f B/s, TX: %.2f B/s, Total Active Ports: %d\r\n", 
+
+        LOG_INFO("Performance: RX: %.2f B/s, TX: %.2f B/s, Total Active Ports: %d\r\n",
                  rx_rate, tx_rate, NUM_PORTS);
-        
+
         s_prev_total_rx = current_total_rx;
         s_prev_total_tx = current_total_tx;
         s_last_print_time = current_time;
     }
 }
-
-// 可删除
-#define PORT0_DIAG_INTERVAL_NS 1000000000ULL
-
-static uint64_t timespec_to_ns(
-    const struct timespec *ts)
-{
-    return (uint64_t)ts->tv_sec * 1000000000ULL +
-           (uint64_t)ts->tv_nsec;
-}
-
-static void print_port0_diagnostics(void)
-{
-    static int active = 0;
-
-    static uint64_t start_ns = 0;
-    static uint64_t last_print_ns = 0;
-
-    static unsigned int prev_net_rx = 0;
-    static unsigned int prev_uart_tx = 0;
-    static unsigned int prev_uart_rx = 0;
-    static unsigned long long prev_tcp_sent = 0;
-
-    struct timespec now_ts;
-    uint64_t now_ns;
-    uint64_t interval_ns;
-    uint64_t elapsed_sec;
-
-    unsigned int current_net_rx;
-    unsigned int current_uart_tx;
-    unsigned int current_uart_rx;
-    unsigned long long current_tcp_sent;
-
-    unsigned int delta_net_rx;
-    unsigned int delta_uart_tx;
-    unsigned int delta_uart_rx;
-    unsigned long long delta_tcp_sent;
-
-    unsigned long long rate_net_rx;
-    unsigned long long rate_uart_tx;
-    unsigned long long rate_uart_rx;
-    unsigned long long rate_tcp_sent;
-
-    ChannelState *channel =
-        &g_system_config.channels[0];
-
-    /*
-     * 只诊断物理通道0。
-     * 没有数据连接时停止输出。
-     */
-    if (channel->data_net_info.num_clients == 0)
-    {
-        active = 0;
-        return;
-    }
-
-    clock_gettime(CLOCK_MONOTONIC, &now_ts);
-    now_ns = timespec_to_ns(&now_ts);
-
-    current_net_rx = channel->tx_net;
-    current_uart_tx = channel->tx_count;
-    current_uart_rx = channel->rx_count;
-    current_tcp_sent =
-        channel->tcp_send_actual_bytes;
-
-    /*
-     * 第一次检测到连接时只保存基准值，
-     * 等一个完整统计周期后再输出。
-     */
-    if (!active)
-    {
-        active = 1;
-
-        start_ns = now_ns;
-        last_print_ns = now_ns;
-
-        prev_net_rx = current_net_rx;
-        prev_uart_tx = current_uart_tx;
-        prev_uart_rx = current_uart_rx;
-        prev_tcp_sent = current_tcp_sent;
-
-        return;
-    }
-
-    interval_ns = now_ns - last_print_ns;
-
-    if (interval_ns < PORT0_DIAG_INTERVAL_NS)
-    {
-        return;
-    }
-
-    /*
-     * unsigned类型减法可以处理计数器自然回绕。
-     */
-    delta_net_rx =
-        current_net_rx - prev_net_rx;
-
-    delta_uart_tx =
-        current_uart_tx - prev_uart_tx;
-
-    delta_uart_rx =
-        current_uart_rx - prev_uart_rx;
-
-    delta_tcp_sent =
-        current_tcp_sent - prev_tcp_sent;
-
-    /*
-     * 按真实时间间隔换算成每秒吞吐。
-     */
-    rate_net_rx =
-        (uint64_t)delta_net_rx *
-        1000000000ULL / interval_ns;
-
-    rate_uart_tx =
-        (uint64_t)delta_uart_tx *
-        1000000000ULL / interval_ns;
-
-    rate_uart_rx =
-        (uint64_t)delta_uart_rx *
-        1000000000ULL / interval_ns;
-
-    rate_tcp_sent =
-        delta_tcp_sent *
-        1000000000ULL / interval_ns;
-
-    elapsed_sec =
-        (now_ns - start_ns) / 1000000000ULL;
-
-    printf(
-        "[DIAG UART0] "
-        "T=%llus "
-        "NET_RX=%llu/s "
-        "UART_TX=%llu/s "
-        "UART_RX=%llu/s "
-        "TCP_SENT=%llu/s "
-        "NET_BUF=%zu "
-        "NET_PEAK=%zu "
-        "NET_DROP=%llu "
-        "UART_OE=%u "
-        "TCP_SHORT=%llu "
-        "TCP_UNSENT=%llu "
-        "TCP_EAGAIN=%llu "
-        "TCP_ERR=%llu "
-"UART_TX_READY_COUNT=%llu "
-"UART_TX_NOT_READY_COUNT=%llu "
-"UART_TX_BATCH_INTERVAL_US=%llu "
-"UART_TX_WRITE_US=%llu "
-"UART_TX_WRITE_MAX_US=%llu\n",
-        (unsigned long long)elapsed_sec,
-        rate_net_rx,
-        rate_uart_tx,
-        rate_uart_rx,
-        rate_tcp_sent,
-        ring_buffer_num_items(
-            &channel->buffer_net),
-        ring_buffer_get_max_used(
-            &channel->buffer_net),
-        (unsigned long long)
-            ring_buffer_get_overwrite_bytes(
-                &channel->buffer_net),
-        channel->overrun_error_count,
-        channel->tcp_short_write_count,
-        channel->tcp_unsent_bytes,
-        channel->tcp_send_eagain_count,
-        channel->tcp_send_error_count,
-        (unsigned long long)
-    s_uart0_tx_ready_count,
-
-(unsigned long long)
-    s_uart0_tx_not_ready_count,
-
-(unsigned long long)
-    s_uart0_batch_interval_us,
-
-(unsigned long long)
-    s_uart0_write_time_us,
-
-(unsigned long long)
-    s_uart0_write_time_max_us);
-
-    fflush(stdout);
-
-    prev_net_rx = current_net_rx;
-    prev_uart_tx = current_uart_tx;
-    prev_uart_rx = current_uart_rx;
-    prev_tcp_sent = current_tcp_sent;
-    last_print_ns = now_ns;
-}
-
-/**/
-
-

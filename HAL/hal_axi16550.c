@@ -250,18 +250,7 @@ void axi16550BaudInit(unsigned int channel, unsigned int baud)
     unsigned int div;
     unsigned short dlm, dll;
     unsigned char reg;
-    div = AXI_16550_CLK / 16 / baud;
-
-    /*------- 临时添加 --------*/
-    // printf("axi16550BaudInit UART channel=%u, clk=%u, baud=%u, div=%u, DLM=0x%02X, DLL=0x%02X\n",
-    //    channel,
-    //    AXI_16550_CLK,
-    //    baud,
-    //    div,
-    //    (div >> 8) & 0xFF,
-    //    div & 0xFF);
-    /*******************/
-    
+    div = AXI_16550_CLK / 16 / baud;    
     dlm = (div >> 8) & 0xFF;
     dll = div & 0xFF;
     reg = userAxiCfgRead(channel, AXI_16550_LCR);
@@ -315,8 +304,12 @@ uint8_t axi16550TypeSet(UART_TYPE uart_type, unsigned int channel)
             return 0;
             break;
     }
-    sysAxiWriteLong(PL_AXI_BASE + UART_TYPE_BASE + channel * 4 , value);
-    // sysAxiWriteLong(PL_AXI_BASE + UART_TYPE_BASE, value);
+    if (pl_led_base_addr == MAP_FAILED)
+    {
+        return 0;
+    }
+
+    sysAxiWriteLong((int32_t)pl_led_base_addr + UART_TYPE_BASE + channel * 4, value);
     return 1;
 }
 
@@ -369,7 +362,7 @@ void axi16550CheckSelfInit(unsigned int channel, unsigned int baud)
     // FCR[7:6] = 11b = 0xC0: FIFO trigger level = 14 bytes
     userAxiCfgWrite(channel, AXI_16550_FCR, 0x87);
     userAxiCfgWrite(channel, AXI_16550_FCR, 0xC1);  // 触发等级设为14字节
-    userAxiCfgWrite(channel, AXI_16550_MCR, 0x10);  /* Normal mode:(bit 4 = 0)   loopback mode:(bit 4 = 1)*/
+    userAxiCfgWrite(channel, AXI_16550_MCR, 0x00);  /* Normal mode:(bit 4 = 0)   loopback mode:(bit 4 = 1)*/
     userAxiCfgWrite(channel, AXI_16550_IER, 0x00);
 }
 
@@ -403,20 +396,13 @@ void axi165502CInit(usart_info_t *uart_instance, int channel)
     }
 
     div = AXI_16550_CLK / 16 / uart_instance->baud_rate;
-
-    /*------- 临时添加 --------*/
-    // printf("axi165502CInit UART channel=%d, clk=%u, baud=%u, "
-    //    "div=%u, DLM=0x%02X, DLL=0x%02X\n",
-    //    channel,
-    //    (unsigned int)AXI_16550_CLK,
-    //    uart_instance->baud_rate,
-    //    div,
-    //    (div >> 8) & 0xFF,
-    //    div & 0xFF);
-    /*******************/
+    // div = 1;
 
     dlm = (div >> 8) & 0xFF;
     dll = div & 0xFF;
+    /* 临时添加 */
+    // printf("div = %d\n", div);
+    /******* */
 
     reg = userAxiCfgRead(channel, AXI_16550_LCR);
     userAxiCfgWrite(channel, AXI_16550_LCR, reg | 0x80);
@@ -424,7 +410,7 @@ void axi165502CInit(usart_info_t *uart_instance, int channel)
     userAxiCfgWrite(channel, AXI_16550_DLL, dll);
     userAxiCfgWrite(channel, AXI_16550_LCR, reg & 0x7F);
     userAxiCfgWrite(channel, AXI_16550_LCR, reg | lcr);
-    userAxiCfgWrite(channel, AXI_16550_MCR, 0x00); /* Normal mode, loopback disabled (bit 4 = 0) 10 00*/
+    userAxiCfgWrite(channel, AXI_16550_MCR, 0x00); /* MCR bit 4: 1 = loopback enabled (0x10), 0 = loopback disabled (0x00)*/
     userAxiCfgWrite(channel, AXI_16550_IER, 0x00);
     
     axi16550FIFOInit(channel);

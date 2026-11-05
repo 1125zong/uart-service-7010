@@ -100,7 +100,6 @@ void* ConfigTaskManager(void* arg)
                             channel->cmd_net_info.state = NET_STATE_CONNECTED;
                         }
                         channel->cmd_net_info.num_clients++;
-                        channel->is_connected = PORT_CONNECTD;
                         
                         LOG_INFO("ConfigTask: Ch %d accepted new CMD client fd=%d. Total CMD clients for this port: %d\n", i, msg.client_fd, channel->cmd_net_info.num_clients);
 
@@ -405,8 +404,6 @@ static void cleanup_config_connection(int index)
             
             // *** 检查数据通道是否也已没有客户端 ***
             if (channel->data_net_info.num_clients == 0) {
-                channel->is_connected = PORT_CONNECT_NONE;
-
                 /* 数据发送尚未排空时，由实时任务在 TxIdle 后关闭 UART。 */
                 if (channel->uart_state == UART_STATE_OPENED &&
                     channel->interface_type != INTERFACE_TYPE_RS485_RX &&

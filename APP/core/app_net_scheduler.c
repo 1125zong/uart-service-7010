@@ -615,11 +615,7 @@ static void cleanup_data_connection(int channel_index, int client_index_in_array
             ring_buffer_reset(&channel->buffer_net);
         }
 
-        /* 检查命令通道是否也无连接 */
-        if (channel->cmd_net_info.num_clients == 0)
-        {
-            channel->is_connected = PORT_CONNECT_NONE;
-        }
+        channel->is_connected = PORT_CONNECT_NONE;
         LOG_INFO("NetScheduler: Ch %d has no clients left. State -> LISTENING.\n", channel_index);
     }
     semGive(g_config_mutex);

@@ -143,6 +143,8 @@ int port_mirror_apply(unsigned char port, unsigned char direction);
 
 int axi16550_Tx_IDLE(unsigned int channel);
 uint8_t axi16550TypeSet(UART_TYPE uart_type, unsigned int channel);
+int axi16550Rs4854WireEnableTx(unsigned int channel);
+int axi16550Rs4854WireDisableTx(unsigned int channel);
 
 uint8_t UART_TX_FIFO_Ready(uint8_t channel);
 #endif /* AXI_16550_H_ */

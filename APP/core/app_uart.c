@@ -88,7 +88,7 @@ int uart_set_interface_type(unsigned int channel, uint8_t interface_type)
 		hw_type = UART_MODE_RS485_TX;
 		break;
 	case INTERFACE_TYPE_RS485_4WIRE:
-		hw_type = UART_MODE_RS485;
+		hw_type = UART_MODE_RS485_RX; // 默认接收，即 赋值 00
 		break;
 	case INTERFACE_TYPE_RS485_RX:
 		hw_type = UART_MODE_RS485_RX;
@@ -102,10 +102,17 @@ int uart_set_interface_type(unsigned int channel, uint8_t interface_type)
 
 	ch = &g_system_config.channels[channel];
 
-	/* 离开发送方向前，软件队列和 UART 都必须发送完。 */
-	if (ch->uart_state == UART_STATE_OPENED && interface_type != ch->interface_type &&
-		(interface_type == INTERFACE_TYPE_RS485_RX || ch->interface_type == INTERFACE_TYPE_RS485_TX) &&
-		(!ring_buffer_is_empty(&ch->buffer_net) || !axi16550_Tx_IDLE(channel)))
+	/*
+	 * UART尚有待发送数据，或者485四线发送驱动仍然开启时，
+	 * 禁止切换或重复应用485四线模式。
+	 */
+	if (ch->uart_state == UART_STATE_OPENED &&
+		(!ring_buffer_is_empty(&ch->buffer_net) ||
+		 !axi16550_Tx_IDLE(channel) ||
+		 ch->rs485_4wire_tx_active) &&
+		(interface_type != ch->interface_type ||
+		 interface_type == INTERFACE_TYPE_RS485_4WIRE ||
+		 ch->interface_type == INTERFACE_TYPE_RS485_4WIRE))
 	{
 		semGive(g_config_mutex);
 		return ERROR; /* 上位机稍后重试 */
@@ -116,6 +123,9 @@ int uart_set_interface_type(unsigned int channel, uint8_t interface_type)
 		semGive(g_config_mutex);
 		return ERROR;
 	}
+
+	/* 硬件已经进入新模式，四线发送状态复位 */
+	ch->rs485_4wire_tx_active = 0;
 
 	ch->interface_type = interface_type;
 	semGive(g_config_mutex);

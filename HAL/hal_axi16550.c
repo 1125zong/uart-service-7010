@@ -283,7 +283,7 @@ void send_xon_xoff_char(uint8_t channel, uint8_t is_xon)
     userAxiCfgWrite(channel, AXI_16550_THR, control_char);
 }
 
-
+// 设置端口类型
 uint8_t axi16550TypeSet(UART_TYPE uart_type, unsigned int channel)
 {
     uint32_t value = 0;
@@ -311,6 +311,19 @@ uint8_t axi16550TypeSet(UART_TYPE uart_type, unsigned int channel)
 
     sysAxiWriteLong((int32_t)pl_led_base_addr + UART_TYPE_BASE + channel * 4, value);
     return 1;
+}
+
+// 辅助函数，用来设置端口类型
+int axi16550Rs4854WireEnableTx(unsigned int channel)
+{
+    /* 写0x02：(RS422_DE, RS485_DE) = (1,0) */
+    return axi16550TypeSet(UART_MODE_RS485, channel) ? OK : ERROR;
+}
+
+int axi16550Rs4854WireDisableTx(unsigned int channel)
+{
+    /* 写0x00：(RS422_DE, RS485_DE) = (0,0) */
+    return axi16550TypeSet(UART_MODE_RS485_RX, channel) ? OK : ERROR;
 }
 
 // 写FPGA 

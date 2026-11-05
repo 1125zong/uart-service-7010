@@ -87,8 +87,14 @@ void init_channel_states(void)
     for (i = 0; i < NUM_PORTS; i++)
     {
         g_system_config.channels[i].uart_state = UART_STATE_CLOSED;
+        g_system_config.channels[i].is_connected = PORT_CONNECT_NONE;
+        g_system_config.channels[i].data_net_info.num_clients = 0;
+        g_system_config.channels[i].cmd_net_info.num_clients = 0;
+        g_system_config.channels[i].rs485_4wire_tx_active = 0; // 初始化默认关闭 ---- 即只接收
+        
         for (j = 0; j < MAX_CLIENTS_PER_CHANNEL; j++)
         {
+            g_system_config.channels[i].cmd_net_info.client_fds[j] = -1;
             g_system_config.channels[i].data_net_info.client_fds[j] = -1;
         }
 

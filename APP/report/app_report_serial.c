@@ -273,54 +273,66 @@ void handle_set_multiple_serial_ports(int client_fd, unsigned char *data, int le
     LOG_INFO("  port_params_index: %d\n", port_params_index);
 
     /* 每个端口配置: 波特率(4)+数据位(1)+停止位(1)+校验位(1)+流控(1)+接口类型(1) = 10字节 */
-    int expected_len = 2 + 1 + 1 + 1 + 1 + 9 + 2; /*  最少17字节 */
-    if (len < expected_len)
+    /* 公共参数9字节，最后还有2字节帧尾 */
+    int expected_len = port_params_index + 9 + 2;
+    if (port_count == 0 || port_count > NUM_PORTS || len < expected_len)
     {
-        LOG_ERROR("  ERROR: Data length mismatch (expected %d, got %d)\n", expected_len, len);
+        LOG_ERROR("Invalid multiple-port configuration\n");
         send_report_response(client_fd, main_id, sub_id, FAILED);
         return;
     }
 
-    semTake(g_config_mutex, WAIT_FOREVER);
+    unsigned char new_interface_type = data[port_params_index + 8];
+
     for (i = 0; i < port_count; i++)
     {
+        unsigned char port_index = data[5 + i];
 
-        // 5a 5a 04 03 02 01 02  00 00 00 00 00 00 00 00 00 a5 a5
-        unsigned char port_index = data[data_idx++];
         if (port_index < 1 || port_index > NUM_PORTS)
         {
-            LOG_WARN("  WARNING: Skipping invalid port index %d\n", port_index);
-            data_idx += 28; /* 跳过这个端口的数据 */
-            continue;
+            LOG_ERROR("Invalid port index %u\n", port_index);
+            send_report_response(client_fd, main_id, sub_id, FAILED);
+            return;
         }
 
-        int ch_idx = port_index - 1;
+        if (uart_set_interface_type(port_index - 1, new_interface_type) != OK)
+        {
+            LOG_ERROR("Failed to apply interface type for port %u\n", port_index);
+            send_report_response(client_fd, main_id, sub_id, FAILED);
+            return;
+        }
+    }
 
-        // 打印端口索引
-        LOG_DEBUG("  ch_idx:%d\n", ch_idx);
+    semTake(g_config_mutex, WAIT_FOREVER);
+
+    for (i = 0; i < port_count; i++)
+    {
+        unsigned char port_index = data[5 + i];
+        int ch_idx = port_index - 1;
+        int param_idx = port_params_index;
 
         ChannelState *ch = &g_system_config.channels[ch_idx];
 
-        /* 波特率 数据位应该从*/
-        // unsigned int baudrate;
-        ch->baudrate = data[port_params_index] << 24 | data[port_params_index + 1] << 16 | data[port_params_index + 2] << 8 | data[port_params_index + 3];
-        port_params_index += 4;
+        ch->baudrate = ((uint32_t)data[param_idx] << 24) | ((uint32_t)data[param_idx + 1] << 16) |
+            ((uint32_t)data[param_idx + 2] << 8) | (uint32_t)data[param_idx + 3];
 
-        /* 串口参数 */
-        ch->data_bits = data[port_params_index++];
-        ch->stop_bits = data[port_params_index++];
-        ch->parity = data[port_params_index++];
-        ch->flow_ctrl = data[port_params_index++];
-        ch->interface_type = data[port_params_index++];
+        param_idx += 4;
 
-        // LOG_DEBUG(" before port_params_index: %d\n", port_params_index);
-        // 返回到波特率索引
-        port_params_index -= 9;
+        ch->data_bits = data[param_idx++];
+        ch->stop_bits = data[param_idx++];
+        ch->parity = data[param_idx++];
+        ch->flow_ctrl = data[param_idx++];
 
-        // LOG_DEBUG(" after port_params_index: %d\n", port_params_index);
-
-        LOG_INFO("Port %d updated: baud=%d, data=%d, stop=%d, parity=%d, flow=%d, interface=%d\n", port_index, ch->baudrate, ch->data_bits, ch->stop_bits, ch->parity, ch->flow_ctrl, ch->interface_type);
+        LOG_INFO("Port %d updated: baud=%d, data=%d, stop=%d, parity=%d, flow=%d, interface=%d\n",
+                 port_index,
+                 ch->baudrate,
+                 ch->data_bits,
+                 ch->stop_bits,
+                 ch->parity,
+                 ch->flow_ctrl,
+                 ch->interface_type);
     }
+
     semGive(g_config_mutex);
 
     /* 发送成功ACK */

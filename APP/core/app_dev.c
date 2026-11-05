@@ -203,11 +203,11 @@ static void copy_channel_config_to_flash(const ChannelState* src, ChannelConfig*
 	dst->op_mode_ip4 = src->op_mode_ip4;
 	
 	// 复制运行时状态
-	dst->uart_state = src->uart_state;
+	dst->uart_state = UART_STATE_CLOSED;
 	dst->is_locked = src->is_locked;
 	memcpy(dst->locked_client_ip, src->locked_client_ip, sizeof(src->locked_client_ip));
 	memcpy(dst->locked_client_mac, src->locked_client_mac, sizeof(src->locked_client_mac));
-	dst->is_connected = src->is_connected;
+	dst->is_connected = PORT_CONNECT_NONE;
 	dst->mirror_enable = src->mirror_enable;
 
 //	打印dst
@@ -305,9 +305,9 @@ static void copy_channel_config_from_flash(const ChannelConfig* src, ChannelStat
 	
 	// 保留运行时状态，如缓冲区和网络连接信息不从Flash恢复
 	// 只恢复配置相关的状态
-	dst->uart_state = src->uart_state;
+	dst->uart_state = UART_STATE_CLOSED;
 	dst->is_locked = src->is_locked;
-	dst->is_connected = src->is_connected;
+	dst->is_connected = PORT_CONNECT_NONE;
 	dst->mirror_enable = src->mirror_enable;
 	memcpy(dst->locked_client_ip, src->locked_client_ip, sizeof(src->locked_client_ip));
 	memcpy(dst->locked_client_mac, src->locked_client_mac, sizeof(src->locked_client_mac));

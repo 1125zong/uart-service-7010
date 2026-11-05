@@ -211,15 +211,47 @@ static void handle_serial_tx_rx(void)
 
         if (semTake(g_config_mutex, NO_WAIT) == OK)
         {
-            if (channel->interface_type != INTERFACE_TYPE_RS485_RX &&
-                !ring_buffer_is_empty(&channel->buffer_net) &&
-                axi16550_TxReady(i))
+            if (!ring_buffer_is_empty(&channel->buffer_net))
             {
-                bytes_count = ring_buffer_dequeue_arr(&channel->buffer_net, (char *)temp_buffer, TX_CHUNK_SIZE);
-                // printf("[uart%d]:tx_cont: %d\n",i, bytes_count);
+                int tx_direction_ready = 0;
 
-                if (bytes_count > 0)
-                    tx_ok = (axi16550SendNoWait(i, temp_buffer, bytes_count) == 0);
+                if (channel->interface_type == INTERFACE_TYPE_RS485_4WIRE)
+                {
+                    if (!channel->rs485_4wire_tx_active)
+                    {
+                        if (axi16550Rs4854WireEnableTx(i) == OK)
+                        {
+                            channel->rs485_4wire_tx_active = 1;
+                        }
+                    }
+                    tx_direction_ready = channel->rs485_4wire_tx_active;
+                }
+                else if (channel->interface_type != INTERFACE_TYPE_RS485_RX)
+                {
+                    tx_direction_ready = 1;
+                }
+                if (tx_direction_ready && axi16550_TxReady(i))
+                {
+                    bytes_count = ring_buffer_dequeue_arr(&channel->buffer_net, (char *)temp_buffer, TX_CHUNK_SIZE);
+
+                    if (bytes_count > 0)
+                    {
+                        tx_ok = (axi16550SendNoWait(i, temp_buffer, bytes_count) == 0);
+                    }
+                }
+            }
+
+            // 如果接口类型当前为485-4且为发送状态且网络缓冲区为空且发送寄存器到达发送态的话，恢复接收
+            if (channel->interface_type == INTERFACE_TYPE_RS485_4WIRE &&
+                channel->rs485_4wire_tx_active &&
+                !tx_ok &&
+                ring_buffer_is_empty(&channel->buffer_net) &&
+                axi16550_Tx_IDLE(i))
+            {
+                if (axi16550Rs4854WireDisableTx(i) == OK)
+                {
+                    channel->rs485_4wire_tx_active = 0;
+                }
             }
             semGive(g_config_mutex);
         }
@@ -242,7 +274,7 @@ static void handle_serial_tx_rx(void)
                              &channel->break_count) == 0 &&
                 bytes_count > 0)
             {
-                //printf("[uart%d]:RX_cont: %d\n", i, bytes_count);
+                // printf("[uart%d]:RX_cont: %d\n", i, bytes_count);
                 semTake(g_stats_mutex, WAIT_FOREVER);
                 channel->rx_count += bytes_count;
                 channel->rx_total_count += bytes_count;
@@ -263,7 +295,8 @@ static void handle_serial_tx_rx(void)
             if (channel->data_net_info.num_clients == 0 &&
                 channel->uart_state == UART_STATE_OPENED &&
                 ring_buffer_is_empty(&channel->buffer_net) &&
-                axi16550_Tx_IDLE(i))
+                axi16550_Tx_IDLE(i) &&
+                !channel->rs485_4wire_tx_active)    // 如果写 0x00 失败、运行状态仍然是发送开启，就不会直接关闭 UART
             {
                 channel->uart_state = UART_STATE_CLOSED;
                 ring_buffer_reset(&channel->buffer_uart);

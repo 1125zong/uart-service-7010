@@ -391,7 +391,9 @@ typedef struct
 typedef struct 
 {
     /* -- 运行时状态 -- */
-	UartPhysicalState   uart_state;       
+	UartPhysicalState   uart_state;   
+    unsigned char rs485_4wire_tx_active;    // 0：表示发送关闭， 1表示开启
+    
     DataChannelInfo     data_net_info;
     CmdChannelInfo      cmd_net_info;
     LocalChannelInfo    local_net_info;
@@ -489,6 +491,8 @@ typedef struct
 
     /* 端口镜像使能 */
     unsigned char mirror_enable;           // 镜像端口: 0=禁用, 1=使能
+
+
 } ChannelState;
 
 /**

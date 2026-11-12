@@ -25,7 +25,7 @@
 #include "hal_flash.h"
 #include "app_dev.h"
 #include "hal_axi16550.h"
-
+#include "app_led.h"
 
 
 /* 全局变量声明 */
@@ -337,7 +337,7 @@ void handle_port_lock(int client_fd, unsigned char *data, int len)
         }
 
         /* 点亮端口对应的LED灯 */
-        Portled(port_index, 1);
+        app_led_set_port_lock(port_index, 1);
 
         LOG_INFO("  Locked port %d, MAC: %02x:%02x:%02x:%02x:%02x:%02x\n",
                  port_index,
@@ -506,7 +506,7 @@ void handle_port_unlock(int client_fd, unsigned char *data, int len)
         update_channel_lock_status(port_index, INTERFACE_LOCK_STATE_UNLOCK);
 
         /* 熄灭端口对应的LED灯 */
-        Portled(port_index, 0);
+        app_led_set_port_lock(port_index, 0);
 
         LOG_INFO("  Port %d unlocked successfully\n", port_index + 1);
     }

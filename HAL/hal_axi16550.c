@@ -375,7 +375,8 @@ void axi16550CheckSelfInit(unsigned int channel, unsigned int baud)
     // FCR[7:6] = 11b = 0xC0: FIFO trigger level = 14 bytes
     userAxiCfgWrite(channel, AXI_16550_FCR, 0x87);
     userAxiCfgWrite(channel, AXI_16550_FCR, 0xC1);  // 触发等级设为14字节
-    userAxiCfgWrite(channel, AXI_16550_MCR, 0x00);  /* Normal mode:(bit 4 = 0)   loopback mode:(bit 4 = 1)*/
+    // 这里开启内环是因为需要给端口自检使用
+    userAxiCfgWrite(channel, AXI_16550_MCR, 0x10);  /* Normal mode:(bit 4 = 0)   loopback mode:(bit 4 = 1)*/
     userAxiCfgWrite(channel, AXI_16550_IER, 0x00);
 }
 

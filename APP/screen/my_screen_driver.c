@@ -141,7 +141,7 @@ static void platform_uart_send(const uint8_t* data, uint16_t length) {
  */
 void platform_uart_close(void) {
     if (g_serial_fd != -1) {
-        printf("\nDRIVER: Closing %s.\n", SERIAL_DEVICE);
+        // printf("\nDRIVER: Closing %s.\n", SERIAL_DEVICE);
         // [新增] 在关闭前，最后再刷新一次缓冲区
         tcdrain(g_serial_fd);
         close(g_serial_fd);
@@ -203,7 +203,7 @@ static void send_command(const char *cmd_str) {
 static void my_screen_clear(void) {
     // 发送 0x22 清屏指令，数据长度为 0
     send_command(CMD_CLEAR_SCREEN);
-    //printf("DRIVER: Screen Cleared (Cmd 0x%02X).\n", CMD_CLEAR_SCREEN);
+    // printf("DRIVER: Screen Cleared (Cmd 0x%02X).\n", CMD_CLEAR_SCREEN);
 }
 
 /**
@@ -287,7 +287,7 @@ static void my_screen_draw_window(const char* title) {
     // 在 (0,0) 绘制标题
     my_screen_draw_text(0, 0, title_buffer);
     
-    // printf("DRIVER: DrawWindow with Title: '%s'\n", title);
+    //  printf("DRIVER: DrawWindow with Title: '%s'\n", title);
 }
 
 /**
@@ -299,7 +299,8 @@ static void my_screen_refresh(void) {
 
 void my_screen_rotate(void)
 {
-    send_command("DIR(1);\\r\\n\ncheckbusy();");
+    send_command("DIR(3);\\r\\n\ncheckbusy();");
+    // send_command("DIR(2);\\r\\n\ncheckbusy();");
     send_command("BL(4);\\r\\n\nCheckBusy();");     // 屏幕亮度
 }
 

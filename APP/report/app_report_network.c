@@ -175,7 +175,7 @@ static void handle_write_network_settings(int client_fd, unsigned char *data, in
         char ip[INET_ADDRSTRLEN];  // 用来接收获取到的Ip
         char netmask[32];
         char gateway[32];
-        if (dhcp("eth1", ip, sizeof(ip), netmask, sizeof(netmask), gateway, sizeof(gateway)) == 0) 
+        if (dhcp("eth0", ip, sizeof(ip), netmask, sizeof(netmask), gateway, sizeof(gateway)) == 0) 
         {
             printf("调用成功,IP = %s\n", ip); // 这里直接用 ip 即可
             printf("掩码: %s\n", netmask);

@@ -43,6 +43,7 @@ HAL_SOURCES = \
 
 # APP source files (core modules)
 APP_SOURCES = \
+    $(APP_CORE_DIR)/app_led.c \
     $(APP_CORE_DIR)/app_dev.c \
     $(APP_CORE_DIR)/app_init.c \
     $(APP_CORE_DIR)/app_net_cfg.c \

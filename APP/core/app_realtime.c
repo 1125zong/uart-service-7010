@@ -25,9 +25,6 @@
 
 #define TX_CHUNK_SIZE (UART_HW_FIFO_SIZE) / 2
 
-// LED每次触发后点亮的持续时间（单位：秒）
-#define LED_ON_DURATION_SECONDS (2)
-
 // 函数声明
 extern void NetworkSchedulerTask(void);
 extern void check_for_new_connections(void);
@@ -39,18 +36,12 @@ extern void run_net_send(void);
 static int setup_high_precision_timer(void);
 
 static void handle_serial_tx_rx(void);
-static void handle_led_blinking(void);
 static void run_medium_frequency_tasks(void);
 // static void run_low_frequency_tasks(void);
 
 /* ------------------ Module-level static variables ------------------ */
 static SEM_ID s_timer_sync_sem; // 用于定时器ISR与任务同步的二进制信号量
 static volatile uint32_t timer_cnt = 0;
-
-static uint64_t s_last_rx_count[NUM_PORTS] = {0};
-static uint64_t s_last_tx_count[NUM_PORTS] = {0};
-static time_t s_last_rx_led_time[NUM_PORTS] = {0}; // 存储RX LED最后活动时间戳
-static time_t s_last_tx_led_time[NUM_PORTS] = {0}; // 存储TX LED最后活动时间戳
 
 /* ------------------ Global Variable Definitions ------------------ */
 
@@ -168,7 +159,6 @@ void *RealTimeSchedulerTask(void *arg)
     }
 
     /* ------------------ 主调度循环 ------------------ */
-    uint32_t loop_cnt = 0;
     while (1)
     {
         check_for_new_connections();
@@ -177,13 +167,6 @@ void *RealTimeSchedulerTask(void *arg)
         /* 串口收发：每通道先 TX 再 RX，一站处理完 */
         handle_serial_tx_rx();
         run_net_send();
-
-        /* LED 每 100 个周期执行一次，减少 time() 系统调用 */
-        if (++loop_cnt >= 100)
-        {
-            handle_led_blinking();
-            loop_cnt = 0;
-        }
     }
 
     return NULL;
@@ -258,6 +241,12 @@ static void handle_serial_tx_rx(void)
 
         if (tx_ok)
         {
+            /*      临时添加      */
+            // printf("[UART%d TX] len=%u\n", i + 1, (unsigned int)bytes_count);
+            // printHex((const char *)temp_buffer, bytes_count);
+            // fflush(stdout);
+            /********************** */
+
             semTake(g_stats_mutex, WAIT_FOREVER);
             channel->tx_count += bytes_count;
             channel->tx_total_count += bytes_count;
@@ -274,7 +263,13 @@ static void handle_serial_tx_rx(void)
                              &channel->break_count) == 0 &&
                 bytes_count > 0)
             {
-                // printf("[uart%d]:RX_cont: %d\n", i, bytes_count);
+                /*      临时添加      */
+                // printf("[UART%d RX] len=%u\n", i + 1, (unsigned int)bytes_count);
+                // printHex((const char *)temp_buffer, bytes_count);
+                // fflush(stdout);
+                /********************** */
+
+                
                 semTake(g_stats_mutex, WAIT_FOREVER);
                 channel->rx_count += bytes_count;
                 channel->rx_total_count += bytes_count;
@@ -296,7 +291,7 @@ static void handle_serial_tx_rx(void)
                 channel->uart_state == UART_STATE_OPENED &&
                 ring_buffer_is_empty(&channel->buffer_net) &&
                 axi16550_Tx_IDLE(i) &&
-                !channel->rs485_4wire_tx_active)    // 如果写 0x00 失败、运行状态仍然是发送开启，就不会直接关闭 UART
+                !channel->rs485_4wire_tx_active) // 如果写 0x00 失败、运行状态仍然是发送开启，就不会直接关闭 UART
             {
                 channel->uart_state = UART_STATE_CLOSED;
                 ring_buffer_reset(&channel->buffer_uart);
@@ -322,91 +317,11 @@ static void run_high_frequency_tasks(void)
 #endif
 
 /**
- * @brief 新增：处理所有通道的LED闪烁逻辑
- * @details 基于可重入单稳态触发器模型。
- * 检测到数据活动时，记录当前时间戳；超过指定时间无活动则关闭LED。
- * 使用真实时间而非周期计数，避免受动态休眠影响。
- * 添加优化：减少不必要的LED状态切换
- */
-static void handle_led_blinking(void)
-{
-    int i;
-    static uint8_t s_last_rx_led_state[NUM_PORTS] = {0}; // 记住上次LED状态
-    static uint8_t s_last_tx_led_state[NUM_PORTS] = {0}; // 记住上次LED状态
-    time_t current_time = time(NULL);
-
-    for (i = 0; i < NUM_PORTS; i++)
-    {
-        ChannelState *channel = &g_system_config.channels[i];
-        uint64_t rx_total, tx_total;
-        semTake(g_stats_mutex, WAIT_FOREVER);
-        rx_total = channel->rx_total_count;
-        tx_total = channel->tx_total_count;
-        semGive(g_stats_mutex);
-        uint8_t current_rx_led_state = s_last_rx_led_state[i];
-        uint8_t current_tx_led_state = s_last_tx_led_state[i];
-
-        // --- 处理 RX LED ---
-        // 1. 检测数据接收活动
-        if (rx_total > s_last_rx_count[i])
-        {
-            s_last_rx_led_time[i] = current_time; // 记录活动时间戳
-            s_last_rx_count[i] = rx_total;        // 更新上次的计数值
-            current_rx_led_state = 1;             // 设置LED为点亮状态
-        }
-        else if (rx_total < s_last_rx_count[i])
-        {
-            s_last_rx_count[i] = rx_total;
-        }
-        else if (current_time - s_last_rx_led_time[i] >= LED_ON_DURATION_SECONDS)
-        {
-            // 超过指定时间无接收活动，关闭LED
-            current_rx_led_state = 0;
-        }
-
-        // 只在LED状态发生变化时才更新硬件状态
-        if (s_last_rx_led_state[i] != current_rx_led_state)
-        {
-            // printf("rxport%d:%d\n", i, current_rx_led_state);
-            rxled(i, current_rx_led_state);
-            s_last_rx_led_state[i] = current_rx_led_state;
-        }
-
-        // --- 处理 TX LED ---
-        // 1. 检测数据发送活动
-        if (tx_total > s_last_tx_count[i])
-        {
-            s_last_tx_led_time[i] = current_time; // 记录活动时间戳
-            s_last_tx_count[i] = tx_total;        // 更新上次的计数值
-            current_tx_led_state = 1;             // 设置LED为点亮状态
-        }
-        else if (tx_total < s_last_tx_count[i])
-        {
-            s_last_tx_count[i] = tx_total;
-        }
-        else if (current_time - s_last_tx_led_time[i] >= LED_ON_DURATION_SECONDS)
-        {
-            // 超过指定时间无发送活动，关闭LED
-            current_tx_led_state = 0;
-        }
-
-        // 只在LED状态发生变化时才更新硬件状态
-        if (s_last_tx_led_state[i] != current_tx_led_state)
-        {
-            // printf("txport%d:%d\n", i, current_tx_led_state);
-            txled(i, current_tx_led_state);
-            s_last_tx_led_state[i] = current_tx_led_state;
-        }
-    }
-}
-
-/**
  * @brief 执行所有中频任务
  */
 static void run_medium_frequency_tasks(void)
 {
     NetworkSchedulerTask();
-    handle_led_blinking();
 }
 
 void channel_count_info(uint8_t channel_index)

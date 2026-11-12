@@ -20,26 +20,6 @@
 #define TX_CHUNK_SIZE (UART_HW_FIFO_SIZE / 2)
 #endif
 
-#define NET_SEND_BATCH_SIZE 64U
-#define NET_SEND_MAX_WAIT_US 0ULL
-#define NET_SEND_TEST_CHANNEL 0
-
-static uint64_t s_net_send_first_us[NUM_PORTS] = {0};
-
-/*
- * 发生短写或EAGAIN后，下一轮不再等待聚合时间，
- * 直接重试未发送的数据。
- */
-static uint8_t s_net_send_retry_immediately[NUM_PORTS] = {0};
-
-static uint64_t net_send_now_us(void)
-{
-    struct timespec ts;
-
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-
-    return (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000ULL;
-}
 /* ------------------ Private Function Prototypes ------------------ */
 void check_for_new_connections(void);
 void run_net_recv(void);
@@ -344,7 +324,7 @@ unsigned char temp_buffer_net_tx[TX_NET_SIZE]; // 使用更小的块大小
 void run_net_send(void)
 {
     int i, j;
-    uint64_t now_us = net_send_now_us();
+    // uint64_t now_us = net_send_now_us();
     fd_set writefds;
     int max_fd = 0;
     int has_fds = 0;
@@ -357,39 +337,13 @@ void run_net_send(void)
     for (i = 0; i < NUM_PORTS; i++)
     {
         ChannelState *channel = &g_system_config.channels[i];
-        ring_buffer_size_t pending = ring_buffer_num_items(&channel->buffer_uart);
 
         has_data[i] = 0;
 
-        if (channel->data_net_info.num_clients == 0 || pending == 0)
+        if (channel->data_net_info.num_clients == 0 ||
+            ring_buffer_is_empty(&channel->buffer_uart))
         {
-            if (i == NET_SEND_TEST_CHANNEL)
-            {
-                s_net_send_first_us[i] = 0;
-                s_net_send_retry_immediately[i] = 0;
-            }
             continue;
-        }
-
-        /* 仅对 UART0 单客户连接启用 64B/1ms 聚合发送。 */
-        if (i == NET_SEND_TEST_CHANNEL && channel->data_net_info.num_clients == 1)
-        {
-            if (s_net_send_first_us[i] == 0)
-            {
-                s_net_send_first_us[i] = now_us;
-            }
-
-            if (!s_net_send_retry_immediately[i] &&
-                pending < NET_SEND_BATCH_SIZE &&
-                now_us - s_net_send_first_us[i] < NET_SEND_MAX_WAIT_US)
-            {
-                continue;
-            }
-        }
-        else if (i == NET_SEND_TEST_CHANNEL)
-        {
-            s_net_send_first_us[i] = 0;
-            s_net_send_retry_immediately[i] = 0;
         }
 
         has_data[i] = 1;
@@ -440,74 +394,6 @@ void run_net_send(void)
 
         if (!any_writable)
             continue;
-
-        /*
-         * UART0 单客户实验路径：先预读，send()成功后再按实际
-         * 发送字节数消费；短写或EAGAIN时下一轮立即重试。
-         */
-        if (i == NET_SEND_TEST_CHANNEL && channel->data_net_info.num_clients == 1)
-        {
-            int fd = channel->data_net_info.client_fds[0];
-            unsigned int bytes_to_send;
-            int sent;
-
-            if (fd < 0 || !FD_ISSET(fd, &writefds))
-            {
-                continue;
-            }
-
-            bytes_to_send = ring_buffer_peek_arr(&channel->buffer_uart,
-                                                 (char *)temp_buffer_net_tx,
-                                                 TX_NET_SIZE);
-            if (bytes_to_send == 0)
-            {
-                s_net_send_first_us[i] = 0;
-                s_net_send_retry_immediately[i] = 0;
-                continue;
-            }
-
-            sent = send(fd, (char *)temp_buffer_net_tx, bytes_to_send, 0);
-
-            if (sent > 0)
-            {
-                /* ============ 临时添加 ============ */
-                // printf("[NET TX] Port=%d, fd=%d, len=%d, data=", i + 1, fd, sent);
-                // for (int k = 0; k < sent; k++)
-                // {
-                //     printf("%02X ", (unsigned char)temp_buffer_net_tx[k]);
-                // }
-                // printf("\n");
-                /* ================================ */
-
-                ring_buffer_discard(&channel->buffer_uart, (ring_buffer_size_t)sent);
-                channel->rx_net += (unsigned int)sent;
-
-                if (ring_buffer_is_empty(&channel->buffer_uart))
-                {
-                    s_net_send_first_us[i] = 0;
-                    s_net_send_retry_immediately[i] = 0;
-                }
-                else if ((unsigned int)sent < bytes_to_send)
-                {
-                    s_net_send_retry_immediately[i] = 1;
-                }
-                else
-                {
-                    s_net_send_first_us[i] = net_send_now_us();
-                    s_net_send_retry_immediately[i] = 0;
-                }
-            }
-            else if (sent == 0 || errno == EWOULDBLOCK || errno == EAGAIN)
-            {
-                s_net_send_retry_immediately[i] = 1;
-            }
-            else
-            {
-                cleanup_data_connection(i, 0);
-            }
-
-            continue;
-        }
 
         // 从环形缓冲区读取一小块数据
         unsigned int bytes_to_send = ring_buffer_dequeue_arr(&channel->buffer_uart, (char *)temp_buffer_net_tx, TX_NET_SIZE);

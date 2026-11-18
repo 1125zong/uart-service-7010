@@ -36,7 +36,7 @@ int get_ip_address(const char *ifname, char *ip_buf, size_t buf_size) {
 
 int dhcp() 
 {
-    const char *iface = "eth1";  // 注意：用户写的enss33可能是笔误，根据实际修改
+    const char *iface = "eth0";  // 注意：用户写的enss33可能是笔误，根据实际修改
     char ip[INET_ADDRSTRLEN];
     int ret;
 
@@ -46,7 +46,7 @@ int dhcp()
     system(up_cmd);
 
     // 2. 执行 udhcpc，获取IP后自动退出
-    char dhcp_cmd[256];               //udhcpc -i eth1 -q -t 3 -T 1 -n
+    char dhcp_cmd[256];               //udhcpc -i eth0 -q -t 3 -T 1 -n
     snprintf(dhcp_cmd, sizeof(dhcp_cmd), "udhcpc -i %s -q -q -t 3 -T 1 -n", iface);
     printf("执行命令: %s\n", dhcp_cmd);
     ret = system(dhcp_cmd);

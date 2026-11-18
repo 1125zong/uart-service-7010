@@ -104,8 +104,11 @@ static int gpio_init_input(int gpio_num)
     return -1;
 }
 
-/* GPIO 919 对应复位按键 */
-#define RESET_GPIO_NUM  919
+/* 7010_mio13对应GPIO引脚编号为919 对应复位按键 */
+
+/* 7020_mio13对应GPIO引脚编号为493 对应复位按键 */
+#define RESET_GPIO_NUM  493
+// #define RESET_GPIO_NUM  919
 static int reset_gpio_ready = 0;
 
 /**

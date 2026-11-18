@@ -22,7 +22,7 @@
 #include "app_init_modules.h"
 #include "app_watchdog.h"
 #include "app_crash_handler.h"
-
+#include "app_led.h"
 
 extern void cleanup_pl_memory_access(void);
 static int mount_jffs2(void);
@@ -69,25 +69,21 @@ void pthread(void)
 }
 #endif
 
-
-void app_start(void) 
+void app_start(void)
 {
     int ret;
-	log_init(LOG_LEVEL_DEBUG);
+    log_init(LOG_LEVEL_DEBUG);
 
-    /* 注册崩溃信号处理，确保后续初始化中崩溃可生成日志 */
-    //crash_handler_init();
-
-	//FPGA_Info_Read();
-	if (init_global_resources() != OK)
-	{
+    // FPGA_Info_Read();
+    if (init_global_resources() != OK)
+    {
         LOG_ERROR("FATAL: Failed to initialize global resources.\n");
         return;
-    }	
+    }
 
-    //echo_fw_config();
-    //mount_jffs2();
-	ret = dev_config_init();
+    // echo_fw_config();
+    // mount_jffs2();
+    ret = dev_config_init();
 
     /* 配置加载成功后，将RX/TX镜像端口恢复到FPGA */
     if (ret == OK)
@@ -107,67 +103,77 @@ void app_start(void)
         LOG_ERROR("Failed to initialize device configuration\n");
     }
 
-	dev_config_dump_all();
-	init_channel_states();
-    
+    dev_config_dump_all();
+    init_channel_states();
+
     /* 根据Flash配置自动初始化看门狗 */
     watchdog_init_from_config();
-
-
 
     // extern void test_rx_led(void);
     // test_rx_led();
 
     // extern void test_init(void);
-    // test_init();  
+    // test_init();
     // extern void test_uart(void);
     // test_uart();
 
-
 #if 1
     ret = create_application_tasks();
-    if (ret == OK)
-    {
-        LOG_INFO("Application tasks created successfully.\n");
-    }
-    else
+    if (ret != OK)
     {
         LOG_ERROR("Failed to create application tasks.\n");
         cleanup_application_tasks();
         return;
     }
+    LOG_INFO("Application tasks created successfully.\n");
+
+    ret = app_led_start();
+    if (ret != 0)
+    {
+        LOG_ERROR("Failed to start LED task, error=%d\n", ret);
+    }
 
     // 程序退出前回收所有线程资源
     LOG_INFO("Application is exiting, cleaning up threads...\n");
+    /* 当前函数内部会等待已有业务线程结束。 */
     cleanup_application_tasks();
+
+    /* 业务线程结束后，再停止 LED 线程。 */
+    ret = app_led_stop();
+    if (ret != 0)
+    {
+        LOG_ERROR("Failed to stop LED task, error=%d\n", ret);
+        return;
+    }
+
+    /* LED线程不再访问寄存器后，才能释放映射。 */
     cleanup_pl_memory_access();
 
 #endif
-
 }
 /**
  * @brief 挂载 jffs2 文件系统
- * 
+ *
  * 该函数将 /dev/mtdblock3 挂载到 /mnt 目录
- * 
+ *
  * @return int 成功返回 0，失败返回 -1
  */
 static int mount_jffs2(void)
 {
     int ret;
-    
+
     printf("mount jffs2 filesystem...\n");
-    
+
     // 尝试挂载：mount -t jffs2 /dev/mtdblock3 /mnt
     ret = mount("/dev/mtdblock3", "/mnt", "jffs2", 0, NULL);
-    
+
     if (ret != 0)
     {
         perror("mount failed!");
         printf("can not mount /dev/mtdblock3 to /mnt\n");
         return -1;
     }
-    
+
     printf("mount /dev/mtdblock3 to /mnt success!\n");
     return 0;
 }
@@ -176,7 +182,8 @@ static int echo_fw_config(void)
 {
     // 以 w 模式打开 = 清空文件 + 覆盖写入
     FILE *fp = fopen("/etc/fw_env.config", "w");
-    if (fp == NULL) {
+    if (fp == NULL)
+    {
         perror("open /etc/fw_env.config failed!");
         return -1;
     }

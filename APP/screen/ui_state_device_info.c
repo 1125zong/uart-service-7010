@@ -56,7 +56,7 @@ static void draw_display_page(ui_manager_t* manager, int item_index)
     {
         case 0: // "Server Name"
             // 示例: QPort125S-65809
-            snprintf(manager->text_buffer, sizeof(manager->text_buffer),"%s",config->model_name);
+            snprintf(manager->text_buffer, sizeof(manager->text_buffer),"%s",config->model);
             int server_name_len = strlen(manager->text_buffer);
             int server_name_width = server_name_len * FONT_WIDTH;
             int server_name_x = (SCREEN_WIDTH - server_name_width) / 2;

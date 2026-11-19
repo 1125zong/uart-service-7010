@@ -21,28 +21,23 @@
 // 内部宏定义
 #define INACTIVITY_TIMEOUT_SECONDS 300 // 5分钟无活动则超时
 
-
-
-
 /* ------------------ Private Function Prototypes ------------------ */
 static void cleanup_config_connection(int index);
 static int handle_config_client(int index);
-static void process_command_frame(int session_index, const unsigned char* frame, int len);
+static void process_command_frame(int session_index, const unsigned char *frame, int len);
 
 /* ------------------ Module-level static variables ------------------ */
 ClientSession s_sessions[MAX_CONFIG_CLIENTS];
 static int s_num_active_sessions = 0;
 
-extern int  g_active_tcp_connections[NUM_PORTS];
-
-
+extern int g_active_tcp_connections[NUM_PORTS];
 
 /* ------------------ Global Variable Definitions ------------------ */
 
 /**
  * @brief ConfigTaskManager 的主入口函数
  */
-void* ConfigTaskManager(void* arg)
+void *ConfigTaskManager(void *arg)
 {
     int i;
     int id = *(int *)arg;
@@ -50,14 +45,14 @@ void* ConfigTaskManager(void* arg)
     LOG_INFO("ConfigTaskManager: Starting\n");
 
     int ret = pthread_setname_np(pthread_self(), "tConfigManager");
-    if(ret != 0)
+    if (ret != 0)
     {
         LOG_ERROR("ConfigTaskManager: Failed to set thread name: %s", strerror(errno));
         return NULL;
     }
 
     // 初始化会话列表
-    for (i = 0; i < MAX_CONFIG_CLIENTS; i++) 
+    for (i = 0; i < MAX_CONFIG_CLIENTS; i++)
     {
         s_sessions[i].fd = -1;
         s_sessions[i].rx_bytes = 0;
@@ -67,11 +62,11 @@ void* ConfigTaskManager(void* arg)
     {
         /* ------------------ 1. 检查并接管新连接 ------------------ */
         NewConnectionMsg msg;
-        
-        //cmd
-        while (msgQReceive(g_config_conn_q, (char*)&msg, sizeof(msg), NO_WAIT) == sizeof(NewConnectionMsg))
+
+        // cmd
+        while (msgQReceive(g_config_conn_q, (char *)&msg, sizeof(msg), NO_WAIT) == sizeof(NewConnectionMsg))
         {
-            if (s_num_active_sessions < MAX_CONFIG_CLIENTS) 
+            if (s_num_active_sessions < MAX_CONFIG_CLIENTS)
             {
                 int new_index = s_num_active_sessions;
                 s_sessions[new_index].fd = msg.client_fd;
@@ -81,52 +76,50 @@ void* ConfigTaskManager(void* arg)
                 s_sessions[new_index].rx_bytes = 0;
                 s_num_active_sessions++;
                 LOG_DEBUG("ConfigTaskManager: Accepted new connection fd=%d, type=%d, channel_index=%d. Total sessions: %d\n",
-                    msg.client_fd, msg.type, msg.channel_index, s_num_active_sessions);
+                          msg.client_fd, msg.type, msg.channel_index, s_num_active_sessions);
 
-                if (msg.type == CONN_TYPE_REALCOM_CMD && msg.channel_index >= 0) 
+                if (msg.type == CONN_TYPE_REALCOM_CMD && msg.channel_index >= 0)
                 {
                     int i = msg.channel_index;
-                    ChannelState* channel = &g_system_config.channels[i];
+                    ChannelState *channel = &g_system_config.channels[i];
 
                     semTake(g_config_mutex, WAIT_FOREVER);
-                    if (channel->cmd_net_info.num_clients < MAX_CLIENTS_PER_CHANNEL) 
+                    if (channel->cmd_net_info.num_clients < MAX_CLIENTS_PER_CHANNEL)
                     {
                         int client_idx = channel->cmd_net_info.num_clients;
                         channel->cmd_net_info.client_fds[client_idx] = msg.client_fd;
-                        
+
                         if (channel->cmd_net_info.num_clients == 0)
                         {
                             // 第一个客户端连接，状态从 LISTENING 变为 CONNECTED
                             channel->cmd_net_info.state = NET_STATE_CONNECTED;
                         }
                         channel->cmd_net_info.num_clients++;
-                        
-                        LOG_INFO("ConfigTask: Ch %d accepted new CMD client fd=%d. Total CMD clients for this port: %d\n", i, msg.client_fd, channel->cmd_net_info.num_clients);
 
-                    } 
+                        LOG_INFO("ConfigTask: Ch %d accepted new CMD client fd=%d. Total CMD clients for this port: %d\n", i, msg.client_fd, channel->cmd_net_info.num_clients);
+                    }
                     else
                     {
                         // 如果此通道的命令连接已满，则拒绝
                         LOG_ERROR("ConfigTask: Ch %d CMD client limit reached. Rejecting fd=%d\n", i, msg.client_fd);
                         close(msg.client_fd);
                         // 因为连接被拒绝，所以不将会话加入 s_sessions 列表
-                        s_num_active_sessions--; 
+                        s_num_active_sessions--;
                     }
                     semGive(g_config_mutex);
                 }
                 LOG_INFO("ConfigTask: Accepted new config connection fd=%d\n", msg.client_fd);
-                
-            } 
-            else 
+            }
+            else
             {
                 LOG_ERROR("ConfigTaskManager: Max config clients reached. Rejecting fd=%d\n", msg.client_fd);
                 close(msg.client_fd);
             }
         }
 
-        if (s_num_active_sessions == 0) 
+        if (s_num_active_sessions == 0)
         {
-            //taskDelay(sysClkRateGet()); // 没有连接时，休眠1秒
+            // taskDelay(sysClkRateGet()); // 没有连接时，休眠1秒
             taskDelay(1); // 没有连接时，休眠1秒
             continue;
         }
@@ -139,19 +132,19 @@ void* ConfigTaskManager(void* arg)
         for (i = 0; i < s_num_active_sessions; i++)
         {
             FD_SET(s_sessions[i].fd, &read_fds);
-            if (s_sessions[i].fd > max_fd) 
+            if (s_sessions[i].fd > max_fd)
             {
                 max_fd = s_sessions[i].fd;
             }
         }
 
         /* ------------------ 3. 阻塞等待事件 ------------------ */
-        struct timeval timeout = { 5, 0 }; // 5秒超时
+        struct timeval timeout = {5, 0}; // 5秒超时
         int ret = select(max_fd + 1, &read_fds, NULL, NULL, &timeout);
 
-        if (ret < 0) 
+        if (ret < 0)
         {
-            if (errno == EINTR) 
+            if (errno == EINTR)
             {
                 continue;
             }
@@ -172,7 +165,7 @@ void* ConfigTaskManager(void* arg)
                 // 有数据可读
                 s_sessions[i].last_activity_time = now;
                 connection_alive = handle_config_client(i);
-            } 
+            }
             else if (ret == 0)
             {
                 // select超时，检查此连接是否不活动超时
@@ -183,7 +176,7 @@ void* ConfigTaskManager(void* arg)
                 }
             }
 
-            if (connection_alive == 0) 
+            if (connection_alive == 0)
             {
                 cleanup_config_connection(i);
             }
@@ -197,11 +190,11 @@ void* ConfigTaskManager(void* arg)
  * @brief 处理单个串口配置指令
  * @details 直接将接收到的数据缓冲区传递给 app_uart.c 中的 handle_command。
  */
-static void handle_serial_port_command(ClientSession* session) 
+static void handle_serial_port_command(ClientSession *session)
 {
-    
-    ChannelState* p_channel = &g_system_config.channels[session->channel_index];
-    handle_command(p_channel, session->fd, (char*)session->rx_buffer, session->rx_bytes, session->channel_index);
+
+    ChannelState *p_channel = &g_system_config.channels[session->channel_index];
+    handle_command(p_channel, session->fd, (char *)session->rx_buffer, session->rx_bytes, session->channel_index);
     // 处理完后清空缓冲区，准备接收下一条指令
     session->rx_bytes = 0;
 }
@@ -210,20 +203,24 @@ static void handle_serial_port_command(ClientSession* session)
  * @brief 处理全局设备配置指令 (CONN_TYPE_SETTING)
  * @details 从字节流中解析出带 A5A5 帧头帧尾的完整协议帧，并交给 process_command_frame 处理。
  */
-static void handle_global_setting_frame(int session_index, ClientSession* session)
+static void handle_global_setting_frame(int session_index, ClientSession *session)
 {
-    while (session->rx_bytes >= MIN_FRAME_SIZE) {
+    while (session->rx_bytes >= MIN_FRAME_SIZE)
+    {
         int frame_start = -1, frame_end = -1, i;
 
-         // 1. 寻找帧头 (0xA5A5)
-        for (i = 0; i <= session->rx_bytes - 2; i++) {
-            if (session->rx_buffer[i] == HEAD_ID_B1 && session->rx_buffer[i+1] == HEAD_ID_B2) {
+        // 1. 寻找帧头 (0xA5A5)
+        for (i = 0; i <= session->rx_bytes - 2; i++)
+        {
+            if (session->rx_buffer[i] == HEAD_ID_B1 && session->rx_buffer[i + 1] == HEAD_ID_B2)
+            {
                 frame_start = i;
                 break;
             }
         }
 
-        if (frame_start == -1) {
+        if (frame_start == -1)
+        {
             // 缓冲区中没有帧头，所有数据都可能是无效的，但为了安全，只丢弃部分
             // 这样可以防止因丢失一个字节而丢弃整个缓冲区
             session->rx_bytes = 0;
@@ -231,35 +228,41 @@ static void handle_global_setting_frame(int session_index, ClientSession* sessio
         }
 
         // 如果帧头不在缓冲区开头，丢弃之前的所有垃圾数据
-        if (frame_start > 0) {
+        if (frame_start > 0)
+        {
             memmove(session->rx_buffer, session->rx_buffer + frame_start, session->rx_bytes - frame_start);
             session->rx_bytes -= frame_start;
         }
 
         // 2. 在找到帧头后，寻找帧尾 (0x5A5A)
         // 帧尾至少在帧头后4个字节 (Cmd+Sub+End)
-        if (session->rx_bytes >= MIN_FRAME_SIZE) {
-            for (i = MIN_FRAME_SIZE - 2; i <= session->rx_bytes - 2; i++) {
-                if (session->rx_buffer[i] == END_ID_B1 && session->rx_buffer[i+1] == END_ID_B2) {
+        if (session->rx_bytes >= MIN_FRAME_SIZE)
+        {
+            for (i = MIN_FRAME_SIZE - 2; i <= session->rx_bytes - 2; i++)
+            {
+                if (session->rx_buffer[i] == END_ID_B1 && session->rx_buffer[i + 1] == END_ID_B2)
+                {
                     frame_end = i;
                     break;
                 }
             }
         }
 
-        if (frame_end != -1) {
+        if (frame_end != -1)
+        {
             // 找到了一个完整的帧
             int frame_len = frame_end + 2;
             process_command_frame(session_index, session->rx_buffer, frame_len);
             // 从缓冲区中移除已处理的帧
             memmove(session->rx_buffer, session->rx_buffer + frame_len, session->rx_bytes - frame_len);
             session->rx_bytes -= frame_len;
-        } else {
+        }
+        else
+        {
             break;
         }
     }
 }
-
 
 /**
  * @brief 接收数据并根据连接类型分发到不同的处理函数
@@ -267,12 +270,12 @@ static void handle_global_setting_frame(int session_index, ClientSession* sessio
  */
 static int handle_config_client(int index)
 {
-    ClientSession* session = &s_sessions[index];
-    
-    int n = recv(session->fd, (char*)session->rx_buffer + session->rx_bytes, MAX_COMMAND_LEN - session->rx_bytes, 0);
-    
+    ClientSession *session = &s_sessions[index];
+
+    int n = recv(session->fd, (char *)session->rx_buffer + session->rx_bytes, MAX_COMMAND_LEN - session->rx_bytes, 0);
+
     // 打印接收到的数据
-    //LOG_DEBUG("Received %d bytes on fd %d: %s\n", n, session->fd, session->rx_buffer);
+    // LOG_DEBUG("Received %d bytes on fd %d: %s\n", n, session->fd, session->rx_buffer);
 
     if (n > 0)
     {
@@ -280,70 +283,69 @@ static int handle_config_client(int index)
         if (session->type == CONN_TYPE_REALCOM_CMD)
         {
             handle_serial_port_command(session);
-        } 
-        
-        else if (session->type == CONN_TYPE_SETTING) 
+        }
+
+        else if (session->type == CONN_TYPE_SETTING)
         {
             LOG_DEBUG("CONN_TYPE_SETTING");
             handle_global_setting_frame(index, session);
         }
         return 1;
-    } 
-    else if (n == 0) 
+    }
+    else if (n == 0)
     {
         // 链接断开，关闭socket，修改连接状态
         LOG_DEBUG("ConfigTask: Client disconnected on fd %d\n", session->fd);
-//        shutdown(session->fd, SHUT_RDWR);
-//        close(session->fd);
-//        session->fd = -1;
-//        g_active_tcp_connections[session->channel_index]--;
-//
-//        LOG_DEBUG("g_active_tcp_connections[%d] = %d\n", session->channel_index, g_active_tcp_connections[session->channel_index]);
-        
-    	
+        //        shutdown(session->fd, SHUT_RDWR);
+        //        close(session->fd);
+        //        session->fd = -1;
+        //        g_active_tcp_connections[session->channel_index]--;
+        //
+        //        LOG_DEBUG("g_active_tcp_connections[%d] = %d\n", session->channel_index, g_active_tcp_connections[session->channel_index]);
+
         return 0;
-    } 
+    }
     else
     {
         return (errno == EWOULDBLOCK || errno == EAGAIN) ? 1 : 0;
-    	return 0;
+        return 0;
     }
 
     return 1;
 }
 
-
 /**
  * @brief 用于全局配置指令
  */
-static void process_command_frame(int session_index, const unsigned char* frame, int len)
+static void process_command_frame(int session_index, const unsigned char *frame, int len)
 {
     unsigned char cmd_id = frame[2];
-    switch (cmd_id) {
-        case CMD_OVERVIEW: 
-            //handle_overview_request(session_index); 
-            break;
-        case CMD_BASIC_SETTINGS:
-            handle_basic_settings_request(session_index, frame, len);
-            break;
-        case CMD_NETWORK_SETTINGS:
-            //handle_network_settings_request(session_index, frame, len);
-            break;
-        case CMD_SERIAL_SETTINGS:
-            handle_serial_settings_request(session_index, frame, len);
-            break;
-        case CMD_OPERATING_SETTINGS:
-            handle_operating_settings_request(session_index, frame, len);
-            break;
-        case CMD_MONITOR:
-            handle_monitor_request(session_index, frame, len);
-            break;
-        case CMD_ADMIN:
-            handle_change_password_request(session_index, frame, len);
-            break;
-        default:
-            LOG_WARN("Unknown command ID: 0x%02X", cmd_id);
-            break;
+    switch (cmd_id)
+    {
+    case CMD_OVERVIEW:
+        // handle_overview_request(session_index);
+        break;
+    case CMD_BASIC_SETTINGS:
+        handle_basic_settings_request(session_index, frame, len);
+        break;
+    case CMD_NETWORK_SETTINGS:
+        // handle_network_settings_request(session_index, frame, len);
+        break;
+    case CMD_SERIAL_SETTINGS:
+        handle_serial_settings_request(session_index, frame, len);
+        break;
+    case CMD_OPERATING_SETTINGS:
+        handle_operating_settings_request(session_index, frame, len);
+        break;
+    case CMD_MONITOR:
+        handle_monitor_request(session_index, frame, len);
+        break;
+    case CMD_ADMIN:
+        handle_change_password_request(session_index, frame, len);
+        break;
+    default:
+        LOG_WARN("Unknown command ID: 0x%02X", cmd_id);
+        break;
     }
 }
 
@@ -354,31 +356,32 @@ static void process_command_frame(int session_index, const unsigned char* frame,
  * 它会将该通道的物理串口状态（uart_state）更新为 CLOSED。
  * * @param index 要清理的会话在 s_sessions 数组中的索引
  */
-static void cleanup_config_connection(int index) 
+static void cleanup_config_connection(int index)
 {
-	int i=0;
+    int i = 0;
     if (index < 0 || index >= s_num_active_sessions)
     {
         LOG_WARN("cleanup_config_connection: Invalid index %d.", index);
         return;
     }
 
-    ClientSession* session = &s_sessions[index];
+    ClientSession *session = &s_sessions[index];
     int fd_to_close = session->fd;
 
     // --- 步骤 1: 如果是特定通道的命令连接，则更新其状态 ---
-    if (session->type == CONN_TYPE_REALCOM_CMD && session->channel_index >= 0) 
+    if (session->type == CONN_TYPE_REALCOM_CMD && session->channel_index >= 0)
     {
         int channel_index = session->channel_index;
-        
+
         semTake(g_config_mutex, WAIT_FOREVER);
-        ChannelState* channel = &g_system_config.channels[channel_index];
-        
+        ChannelState *channel = &g_system_config.channels[channel_index];
+
         // 在该通道的客户端数组中查找并移除 fd
         int client_found = 0;
-        for (i = 0; i < channel->cmd_net_info.num_clients; i++) 
+        for (i = 0; i < channel->cmd_net_info.num_clients; i++)
         {
-            if (channel->cmd_net_info.client_fds[i] == fd_to_close) {
+            if (channel->cmd_net_info.client_fds[i] == fd_to_close)
+            {
                 // 找到了，用最后一个元素覆盖当前位置，然后缩减数组大小
                 int last_client_index = channel->cmd_net_info.num_clients - 1;
                 channel->cmd_net_info.client_fds[i] = channel->cmd_net_info.client_fds[last_client_index];
@@ -390,25 +393,25 @@ static void cleanup_config_connection(int index)
         }
 
         // 更新全局TCP连接计数
-        if (client_found && g_active_tcp_connections[channel_index] > 0) {
+        if (client_found && g_active_tcp_connections[channel_index] > 0)
+        {
             g_active_tcp_connections[channel_index]--;
-            LOG_DEBUG("ConfigTask: Ch %d g_active_tcp_connections decreased to %d\n", 
+            LOG_DEBUG("ConfigTask: Ch %d g_active_tcp_connections decreased to %d\n",
                       channel_index, g_active_tcp_connections[channel_index]);
         }
 
         // 如果这是最后一个命令客户端，更新网络状态
-        if (client_found && channel->cmd_net_info.num_clients == 0) 
+        if (client_found && channel->cmd_net_info.num_clients == 0)
         {
             channel->cmd_net_info.state = NET_STATE_LISTENING;
             LOG_INFO("ConfigTask: Ch %d has no CMD clients left. State -> LISTENING.\n", channel_index);
-            
+
             // *** 检查数据通道是否也已没有客户端 ***
-            if (channel->data_net_info.num_clients == 0) {
+            if (channel->data_net_info.num_clients == 0)
+            {
                 /* 数据发送尚未排空时，由实时任务在 TxIdle 后关闭 UART。 */
-                if (channel->uart_state == UART_STATE_OPENED &&
-                    channel->interface_type != INTERFACE_TYPE_RS485_RX &&
-                    (!ring_buffer_is_empty(&channel->buffer_net) ||
-                     !axi16550_Tx_IDLE(channel_index)))
+                if (channel->uart_state == UART_STATE_OPENED && (!ring_buffer_is_empty(&channel->buffer_net) ||
+                     !axi16550_Tx_IDLE(channel_index) || channel->rs485_tx_active))
                 {
                     LOG_INFO("ConfigTask: All network clients for Ch %d disconnected. "
                              "UART close deferred until TX drain.\n",
@@ -445,7 +448,6 @@ static void cleanup_config_connection(int index)
     s_num_active_sessions--;
 }
 
-
 /**
  * @brief 设置网络接口的IP地址、子网掩码和默认网关。
  *
@@ -466,13 +468,12 @@ int net_cfg_set_network_settings(const char *interface_name, const char *ip_addr
     snprintf(command_buffer, sizeof(command_buffer), "%s %s netmask %s", interface_name, ip_address, netmask);
 
     printf("Executing ifconfig command: '%s'\n", command_buffer);
-//    if (ifconfig(command_buffer) != 0) // 假设成功返回 0
-//    {
-//        perror("ifconfig failed");
-//        return -1;
-//    }
+    //    if (ifconfig(command_buffer) != 0) // 假设成功返回 0
+    //    {
+    //        perror("ifconfig failed");
+    //        return -1;
+    //    }
     printf("Successfully set IP address and netmask.\n");
-
 
     /******************************************************************/
     /* 2. 使用 routec 添加默认网关                                    */
@@ -482,14 +483,12 @@ int net_cfg_set_network_settings(const char *interface_name, const char *ip_addr
     snprintf(command_buffer, sizeof(command_buffer), "add default %s", gateway);
 
     printf("Executing routec command: '%s'\n", command_buffer);
-//    if (routec(command_buffer) != 0) // 假设成功返回 0
-//    {
-//        perror("routec failed to set default gateway");
-//        return -1;
-//    }
+    //    if (routec(command_buffer) != 0) // 假设成功返回 0
+    //    {
+    //        perror("routec failed to set default gateway");
+    //        return -1;
+    //    }
     printf("Successfully set default gateway.\n");
 
     return 0;
 }
-
-

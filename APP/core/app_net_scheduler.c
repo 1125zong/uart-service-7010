@@ -485,10 +485,10 @@ static void cleanup_data_connection(int channel_index, int client_index_in_array
          * TCP FIN 可能紧跟在最后一批数据之后到达。此时不能立即关闭 UART
          * 或清空 buffer_net，否则尚未写入 UART 的数据会丢失。
          */
-        if (channel->interface_type != INTERFACE_TYPE_RS485_RX &&
-            channel->uart_state == UART_STATE_OPENED &&
+        if (channel->uart_state == UART_STATE_OPENED &&
             (!ring_buffer_is_empty(&channel->buffer_net) ||
-             !axi16550_Tx_IDLE(channel_index)))
+             !axi16550_Tx_IDLE(channel_index) ||
+             channel->rs485_tx_active))
         {
             LOG_INFO("NetScheduler: Ch %d client disconnected; "
                      "waiting for UART TX drain, pending=%zu.\n",

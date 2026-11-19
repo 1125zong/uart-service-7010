@@ -194,26 +194,45 @@ static void handle_serial_tx_rx(void)
 
         if (semTake(g_config_mutex, NO_WAIT) == OK)
         {
-            if (!ring_buffer_is_empty(&channel->buffer_net))
+            int is_rs485 = channel->interface_type == INTERFACE_TYPE_RS485_2WIRE || channel->interface_type == INTERFACE_TYPE_RS485_4WIRE;
+
+            /*
+             * 有待发数据且 UART 可以接收下一批数据时，
+             * 再开启发送方向。
+             */
+            if (!ring_buffer_is_empty(&channel->buffer_net) && axi16550_TxReady(i))
             {
                 int tx_direction_ready = 0;
 
-                if (channel->interface_type == INTERFACE_TYPE_RS485_4WIRE)
+                if (is_rs485)
                 {
-                    if (!channel->rs485_4wire_tx_active)
+                    if (!channel->rs485_tx_active)
                     {
-                        if (axi16550Rs4854WireEnableTx(i) == OK)
+                        UART_TYPE tx_mode;
+
+                        if (channel->interface_type == INTERFACE_TYPE_RS485_2WIRE)
                         {
-                            channel->rs485_4wire_tx_active = 1;
+                            tx_mode = UART_MODE_RS485_TX;
+                        }
+                        else
+                        {
+                            tx_mode = UART_MODE_RS485;
+                        }
+
+                        if (axi16550TypeSet(tx_mode, i))
+                        {
+                            channel->rs485_tx_active = 1;
                         }
                     }
-                    tx_direction_ready = channel->rs485_4wire_tx_active;
+
+                    tx_direction_ready = channel->rs485_tx_active;
                 }
-                else if (channel->interface_type != INTERFACE_TYPE_RS485_RX)
+                else if (channel->interface_type == INTERFACE_TYPE_RS232 || channel->interface_type == INTERFACE_TYPE_RS422)
                 {
                     tx_direction_ready = 1;
                 }
-                if (tx_direction_ready && axi16550_TxReady(i))
+                /* 方向切换成功后，才取出数据并写入 UART */
+                if (tx_direction_ready)
                 {
                     bytes_count = ring_buffer_dequeue_arr(&channel->buffer_net, (char *)temp_buffer, TX_CHUNK_SIZE);
 
@@ -224,18 +243,19 @@ static void handle_serial_tx_rx(void)
                 }
             }
 
-            // 如果接口类型当前为485-4且为发送状态且网络缓冲区为空且发送寄存器到达发送态的话，恢复接收
-            if (channel->interface_type == INTERFACE_TYPE_RS485_4WIRE &&
-                channel->rs485_4wire_tx_active &&
-                !tx_ok &&
-                ring_buffer_is_empty(&channel->buffer_net) &&
-                axi16550_Tx_IDLE(i))
+            /*
+             * 本轮未写入新数据、软件队列为空，
+             * 且 UART FIFO/移位寄存器全部为空时，恢复 RX。
+             */
+            if (is_rs485 && channel->rs485_tx_active && !tx_ok && ring_buffer_is_empty(&channel->buffer_net) && axi16550_Tx_IDLE(i))
             {
-                if (axi16550Rs4854WireDisableTx(i) == OK)
+                /* 两线、四线恢复 RX 都写 0x00 */
+                if (axi16550TypeSet(UART_MODE_RS485_RX, i))
                 {
-                    channel->rs485_4wire_tx_active = 0;
+                    channel->rs485_tx_active = 0;
                 }
             }
+
             semGive(g_config_mutex);
         }
 
@@ -269,7 +289,6 @@ static void handle_serial_tx_rx(void)
                 // fflush(stdout);
                 /********************** */
 
-                
                 semTake(g_stats_mutex, WAIT_FOREVER);
                 channel->rx_count += bytes_count;
                 channel->rx_total_count += bytes_count;
@@ -291,7 +310,7 @@ static void handle_serial_tx_rx(void)
                 channel->uart_state == UART_STATE_OPENED &&
                 ring_buffer_is_empty(&channel->buffer_net) &&
                 axi16550_Tx_IDLE(i) &&
-                !channel->rs485_4wire_tx_active) // 如果写 0x00 失败、运行状态仍然是发送开启，就不会直接关闭 UART
+                !channel->rs485_tx_active)
             {
                 channel->uart_state = UART_STATE_CLOSED;
                 ring_buffer_reset(&channel->buffer_uart);

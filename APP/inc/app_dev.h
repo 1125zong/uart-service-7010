@@ -170,10 +170,9 @@ typedef enum
 { 
     INTERFACE_TYPE_RS232   = 0x00,
     INTERFACE_TYPE_RS422   = 0x01,
-    INTERFACE_TYPE_RS485_TX   = 0x02,
+    INTERFACE_TYPE_RS485_2WIRE   = 0x02,
     INTERFACE_TYPE_RS485_4WIRE = 0x03,
-    INTERFACE_TYPE_RS485_RX    = 0x04,
-    INTERFACE_TYPE_CAN     = 0x05
+    INTERFACE_TYPE_CAN     = 0x04
 } Interface_Mode;
 
 //接口数量
@@ -392,7 +391,7 @@ typedef struct
 {
     /* -- 运行时状态 -- */
 	UartPhysicalState   uart_state;   
-    unsigned char rs485_4wire_tx_active;    // 0：表示发送关闭， 1表示开启
+    unsigned char rs485_tx_active;    // 0：表示发送关闭， 1表示开启
     
     DataChannelInfo     data_net_info;
     CmdChannelInfo      cmd_net_info;

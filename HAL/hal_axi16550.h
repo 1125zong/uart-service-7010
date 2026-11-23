@@ -124,6 +124,9 @@ unsigned int userAxiCfgRead(unsigned int channel, unsigned int offset);
 int axi16550Recv(unsigned int channel, uint8_t *buffer, uint32_t *len,
                  uint32_t *frame_err, uint32_t *parity_err,
                  uint32_t *overrun_err, uint32_t *break_cnt);
+int axi16550RecvBounded(unsigned int channel, uint8_t *buffer, uint32_t capacity,
+                        uint32_t *len, uint32_t *frame_err, uint32_t *parity_err,
+                        uint32_t *overrun_err, uint32_t *break_cnt);
 int axi16550_TxReady(unsigned int channel);
 int axi16550SendNoWait(unsigned int channel, uint8_t *buffer, uint32_t len);
 int axi16550Send(unsigned int channel, uint8_t *buffer, uint32_t len);

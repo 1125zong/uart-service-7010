@@ -82,23 +82,42 @@ static int is_port_locked(int port_index)
  * @note 返回数据格式:
  *       0xA5 0xA5 | main_id | sub_id | 成功端口数量 | 成功端口号列表 | 0x5A 0x5A
  * @note 软复位操作:
- *       1. 清空接收/发送FIFO
- *       2. 清空接收缓冲区
- *       3. 复位调制解调器状态
+ *       1. 清空接收/发送FIFO并保持FIFO启用
+ *       2. 复位调制解调器状态
  */
 void handle_port_reset(int client_fd, unsigned char *data, int len)
 {
+    if (data == NULL || len < 4)
+    {
+        return;
+    }
+
     uint8_t main_id = data[2];
     uint8_t sub_id  = data[3];
 
-    // 要复位的端口数量
-    uint8_t port_num = data[4];
-
-    // 提取要复位的端口号列表
-    unsigned char port_list[NUM_PORTS];
-    for (int i = 0; i < port_num && i < NUM_PORTS; i++)
+    if (len < 7)
     {
-        port_list[i] = data[5 + i];
+        send_report_response(client_fd, main_id, sub_id, FAILED);
+        return;
+    }
+
+    uint8_t port_num = data[4];
+    if (port_num == 0 || port_num > NUM_PORTS || len != 7 + port_num)
+    {
+        LOG_WARN("  Invalid port reset request: port count=%u, length=%d\n", (unsigned int)port_num, len);
+        send_report_response(client_fd, main_id, sub_id, FAILED);
+        return;
+    }
+
+    const unsigned char *port_list = &data[5];
+    for (int i = 0; i < port_num; i++)
+    {
+        if (port_list[i] < 1 || port_list[i] > NUM_PORTS)
+        {
+            LOG_WARN("  Invalid reset port number: %u\n", (unsigned int)port_list[i]);
+            send_report_response(client_fd, main_id, sub_id, FAILED);
+            return;
+        }
     }
 
     LOG_INFO("  Action: Port Reset, SubID=0x01, port_num=%d\n", port_num);
@@ -127,38 +146,25 @@ void handle_port_reset(int client_fd, unsigned char *data, int len)
     unsigned char success_port_list[NUM_PORTS];
 
     // 对请求的每个端口进行软复位
-    for (int i = 0; i < port_num && i < NUM_PORTS; i++)
+    for (int i = 0; i < port_num; i++)
     {
         unsigned char port_id = port_list[i];
-
-        if (port_id > NUM_PORTS)
-        {
-            LOG_WARN("  Port %d: Invalid port ID, skip\n", port_id);
-            continue;
-        }
+        /* 协议端口号从 1 开始，UART 硬件通道从 0 开始。 */
+        unsigned int channel = port_id - 1;
 
         LOG_INFO("  Resetting Port %d...\n", port_id);
 
-        // 清空接收缓冲区
-        unsigned char recv_buf[64];
-        unsigned int recv_len = sizeof(recv_buf);
-        axi16550Recv(port_id, recv_buf, &recv_len, NULL, NULL, NULL, NULL);
-
-        // 复位FIFO (FCR bit 1=1 清空TX FIFO, bit 2=1 清空RX FIFO)
-        userAxiCfgWrite(port_id, AXI_16550_FCR, 0x06);
+        // 清空 RX/TX FIFO，并保持正常的 FIFO 启用配置。
+        axi16550FIFOInit(channel);
 
         // 复位调制解调器状态 (MCR bit 0=1 触发DTR, bit 1=1 触发RTS)
         // 然后清零以恢复正常状态
-        userAxiCfgWrite(port_id, AXI_16550_MCR, 0x03);
+        userAxiCfgWrite(channel, AXI_16550_MCR, 0x03);
         usleep(1000);  // 1ms
-        userAxiCfgWrite(port_id, AXI_16550_MCR, 0x00);
+        userAxiCfgWrite(channel, AXI_16550_MCR, 0x00);
 
         // 清空LSR状态寄存器 (读取可清除错误状态)
-        unsigned char lsr = userAxiCfgRead(port_id, AXI_16550_LSR);
-
-        // 再次清空接收缓冲区
-        recv_len = sizeof(recv_buf);
-        axi16550Recv(port_id, recv_buf, &recv_len, NULL, NULL, NULL, NULL);
+        unsigned char lsr = userAxiCfgRead(channel, AXI_16550_LSR);
 
         LOG_INFO("  Port %d: RESET DONE (LSR=0x%02X)\n", port_id, lsr);
         success_port_list[success_count++] = port_id;

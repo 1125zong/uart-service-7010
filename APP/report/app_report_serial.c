@@ -314,7 +314,7 @@ void handle_set_multiple_serial_ports(int client_fd, unsigned char *data, int le
         ChannelState *ch = &g_system_config.channels[ch_idx];
 
         ch->baudrate = ((uint32_t)data[param_idx] << 24) | ((uint32_t)data[param_idx + 1] << 16) |
-            ((uint32_t)data[param_idx + 2] << 8) | (uint32_t)data[param_idx + 3];
+                       ((uint32_t)data[param_idx + 2] << 8) | (uint32_t)data[param_idx + 3];
 
         param_idx += 4;
 
@@ -433,10 +433,16 @@ void handle_set_single_realcom_mode(int client_fd, unsigned char *data, int len)
 
     uint8_t port_index = data[4];
     LOG_INFO("  Port Index: %d\n", port_index);
-
     LOG_INFO("  Port Mode: %d\n", data[5]);
 
     uint8_t port_connect_max = data[6];
+    if (port_connect_max < 1 || port_connect_max > MAX_CLIENTS_PER_CHANNEL)
+    {
+        LOG_WARN("Invalid max connections: %u, allowed range: 1..%d\n", port_connect_max, MAX_CLIENTS_PER_CHANNEL);
+
+        send_report_response(client_fd, main_id, sub_id, FAILED);
+        return;
+    }
     LOG_INFO("  Port Connect Max: %d\n", port_connect_max);
 
     uint8_t Tcp_connect_timeout = data[7];
@@ -471,7 +477,6 @@ void handle_set_multiple_realcom_mode(int client_fd, unsigned char *data, int le
 {
     uint8_t main_id = data[2];
     uint8_t sub_id = data[3];
-    uint8_t port_mode;
     LOG_INFO("  Action: Set Multiple RealCom Mode, MainID=0x%02X, SubID=0x%02X\n", main_id, sub_id);
 
     if (is_device_locked())
@@ -490,25 +495,50 @@ void handle_set_multiple_realcom_mode(int client_fd, unsigned char *data, int le
     }
 
     unsigned char port_count = data[4];
-    int data_idx = 5;
-    int i;
-
-    port_mode = data[5 + port_count];
-    uint8_t port_connect_max = data[6 + port_count];
-    uint8_t Tcp_connect_timeout = data[7 + port_count];
-
-    semTake(g_config_mutex, WAIT_FOREVER);
-    for (i = 0; i < port_count; i++)
+    if (port_count < 1 || port_count > NUM_PORTS || len != 10 + (int)port_count)
     {
-        unsigned char port_index = data[data_idx++];
-        if (port_index >= 1 && port_index <= NUM_PORTS)
+        send_report_response(client_fd, main_id, sub_id, FAILED);
+        return;
+    }
+
+    /* Real COM 函数用 OP_MODE_REAL_COM，TCP Server 函数用 OP_MODE_TCP_SERVER */
+    const uint8_t expected_mode = OP_MODE_REAL_COM;
+    const uint8_t port_connect_max = data[6 + port_count];
+    const uint8_t tcp_alive_time = data[7 + port_count];
+
+    if (data[5 + port_count] != expected_mode || port_connect_max < 1 || port_connect_max > MAX_CLIENTS_PER_CHANNEL)
+    {
+        send_report_response(client_fd, main_id, sub_id, FAILED);
+        return;
+    }
+
+    /* 整份列表检查通过后，才开始修改配置 */
+    for (int i = 0; i < port_count; i++)
+    {
+        uint8_t port_index = data[5 + i];
+        if (port_index < 1 || port_index > NUM_PORTS)
         {
-            g_system_config.channels[port_index - 1].op_mode = port_mode;
-            g_system_config.channels[port_index - 1].max_connections = port_connect_max;
-            g_system_config.channels[port_index - 1].tcp_alive_check_time_min = Tcp_connect_timeout;
-            LOG_INFO("  Port %d set to RealCom mode max_connections: %d, tcp_alive_check_time_min: %d\n", port_index, port_connect_max, Tcp_connect_timeout);
+            LOG_WARN("Invalid port index: %u\n", (unsigned int)port_index);
+            send_report_response(client_fd, main_id, sub_id, FAILED);
+            return;
         }
     }
+
+    if (semTake(g_config_mutex, WAIT_FOREVER) != OK)
+    {
+        send_report_response(client_fd, main_id, sub_id, FAILED);
+        return;
+    }
+
+    for (int i = 0; i < port_count; i++)
+    {
+        ChannelState *ch = &g_system_config.channels[data[5 + i] - 1];
+
+        ch->op_mode = expected_mode;
+        ch->max_connections = port_connect_max;
+        ch->tcp_alive_check_time_min = tcp_alive_time;
+    }
+
     semGive(g_config_mutex);
 
     /* 发送ACK */
@@ -547,6 +577,13 @@ void handle_set_single_tcp_server_mode(int client_fd, unsigned char *data, int l
     LOG_INFO("  Port Mode: %d\n", data[5]);
 
     uint8_t port_connect_max = data[6];
+    if (port_connect_max < 1 || port_connect_max > MAX_CLIENTS_PER_CHANNEL)
+    {
+        LOG_WARN("Invalid max connections: %u, allowed range: 1..%d\n", port_connect_max, MAX_CLIENTS_PER_CHANNEL);
+
+        send_report_response(client_fd, main_id, sub_id, FAILED);
+        return;
+    }
     LOG_INFO("  Port Connect Max: %d\n", port_connect_max);
 
     uint8_t Tcp_connect_timeout = data[7];
@@ -599,25 +636,50 @@ void handle_set_multiple_tcp_server_mode(int client_fd, unsigned char *data, int
     }
 
     unsigned char port_count = data[4];
-    int data_idx = 5;
-    int i;
-
-    // port_mode = data[5 + port_count];
-    uint8_t port_connect_max = data[6 + port_count];
-    uint8_t Tcp_connect_timeout = data[7 + port_count];
-
-    semTake(g_config_mutex, WAIT_FOREVER);
-    for (i = 0; i < port_count; i++)
+    if (port_count < 1 || port_count > NUM_PORTS || len != 10 + (int)port_count)
     {
-        unsigned char port_index = data[data_idx++];
-        if (port_index >= 1 && port_index <= NUM_PORTS)
+        send_report_response(client_fd, main_id, sub_id, FAILED);
+        return;
+    }
+
+    /* Real COM 函数用 OP_MODE_REAL_COM，TCP Server 函数用 OP_MODE_TCP_SERVER */
+    const uint8_t expected_mode = OP_MODE_TCP_SERVER;
+    const uint8_t port_connect_max = data[6 + port_count];
+    const uint8_t tcp_alive_time = data[7 + port_count];
+
+    if (data[5 + port_count] != expected_mode || port_connect_max < 1 || port_connect_max > MAX_CLIENTS_PER_CHANNEL)
+    {
+        send_report_response(client_fd, main_id, sub_id, FAILED);
+        return;
+    }
+
+    /* 整份列表检查通过后，才开始修改配置 */
+    for (int i = 0; i < port_count; i++)
+    {
+        uint8_t port_index = data[5 + i];
+        if (port_index < 1 || port_index > NUM_PORTS)
         {
-            g_system_config.channels[port_index - 1].op_mode = OP_MODE_TCP_SERVER;
-            g_system_config.channels[port_index - 1].max_connections = port_connect_max;
-            g_system_config.channels[port_index - 1].tcp_alive_check_time_min = Tcp_connect_timeout;
-            LOG_INFO("  Port %d set to TCP Server mode max_connections: %d, tcp_alive_check_time_min: %d\n", port_index, port_connect_max, Tcp_connect_timeout);
+            LOG_WARN("Invalid port index: %u\n", (unsigned int)port_index);
+            send_report_response(client_fd, main_id, sub_id, FAILED);
+            return;
         }
     }
+
+    if (semTake(g_config_mutex, WAIT_FOREVER) != OK)
+    {
+        send_report_response(client_fd, main_id, sub_id, FAILED);
+        return;
+    }
+
+    for (int i = 0; i < port_count; i++)
+    {
+        ChannelState *ch = &g_system_config.channels[data[5 + i] - 1];
+
+        ch->op_mode = expected_mode;
+        ch->max_connections = port_connect_max;
+        ch->tcp_alive_check_time_min = tcp_alive_time;
+    }
+
     semGive(g_config_mutex);
 
     /* 发送ACK */

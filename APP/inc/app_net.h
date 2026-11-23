@@ -13,6 +13,7 @@ typedef struct {
     // 接收缓冲区，用于处理不完整的TCP数据包
     unsigned char rx_buffer[MAX_COMMAND_LEN];
     int rx_bytes;
+    int uart_command_deferred; // 当前缓冲区首条 CMD 等待 UART 排空
 } ClientSession;
 
 extern ClientSession s_sessions[];

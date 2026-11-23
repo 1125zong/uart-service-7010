@@ -161,9 +161,9 @@ void *RealTimeSchedulerTask(void *arg)
     /* ------------------ 主调度循环 ------------------ */
     while (1)
     {
-        check_for_new_connections();
-
+        /* 先回收已就绪的旧连接，再登记重连，避免旧连接占着名额。 */
         run_net_recv();
+        check_for_new_connections();
         /* 串口收发：每通道先 TX 再 RX，一站处理完 */
         handle_serial_tx_rx();
         run_net_send();
@@ -185,14 +185,18 @@ static void handle_serial_tx_rx(void)
     for (i = 0; i < NUM_PORTS; i++)
     {
         ChannelState *channel = &g_system_config.channels[i];
-        if (channel->uart_state != UART_STATE_OPENED)
+        if (semTake(g_config_mutex, NO_WAIT) != OK)
             continue;
+        if (channel->uart_state != UART_STATE_OPENED)
+        {
+            semGive(g_config_mutex);
+            continue;
+        }
 
         /* --- TX: buffer_net → UART --- */
         uint32_t bytes_count = 0;
         int tx_ok = 0;
 
-        if (semTake(g_config_mutex, NO_WAIT) == OK)
         {
             int is_rs485 = channel->interface_type == INTERFACE_TYPE_RS485_2WIRE || channel->interface_type == INTERFACE_TYPE_RS485_4WIRE;
 
@@ -255,8 +259,6 @@ static void handle_serial_tx_rx(void)
                     channel->rs485_tx_active = 0;
                 }
             }
-
-            semGive(g_config_mutex);
         }
 
         if (tx_ok)
@@ -276,11 +278,11 @@ static void handle_serial_tx_rx(void)
         /* --- RX: UART → buffer_uart --- */
         {
             uint32_t bytes_count = 0;
-            if (axi16550Recv(i, temp_buffer, &bytes_count,
-                             &channel->frame_error_count,
-                             &channel->parity_error_count,
-                             &channel->overrun_error_count,
-                             &channel->break_count) == 0 &&
+            if (axi16550RecvBounded(i, temp_buffer, sizeof(temp_buffer), &bytes_count,
+                                    &channel->frame_error_count,
+                                    &channel->parity_error_count,
+                                    &channel->overrun_error_count,
+                                    &channel->break_count) == 0 &&
                 bytes_count > 0)
             {
                 /*      临时添加      */
@@ -304,20 +306,19 @@ static void handle_serial_tx_rx(void)
          * 最后一个数据客户端断开后，继续排空已经进入 buffer_net 的数据。
          * 只有软件队列为空且 UART FIFO/移位寄存器均为空时，才关闭 UART。
          */
-        if (semTake(g_config_mutex, NO_WAIT) == OK)
+        if (channel->uart_close_pending &&
+            channel->data_net_info.num_clients == 0 &&
+            channel->uart_reconfigure_waiters == 0 &&
+            ring_buffer_is_empty(&channel->buffer_net) &&
+            axi16550_Tx_IDLE(i) &&
+            !channel->rs485_tx_active)
         {
-            if (channel->data_net_info.num_clients == 0 &&
-                channel->uart_state == UART_STATE_OPENED &&
-                ring_buffer_is_empty(&channel->buffer_net) &&
-                axi16550_Tx_IDLE(i) &&
-                !channel->rs485_tx_active)
-            {
-                channel->uart_state = UART_STATE_CLOSED;
-                ring_buffer_reset(&channel->buffer_uart);
-                LOG_INFO("RealTimeScheduler: Ch %d UART TX drained. UART closed.\n", i);
-            }
-            semGive(g_config_mutex);
+            channel->uart_state = UART_STATE_CLOSED;
+            channel->uart_close_pending = 0;
+            ring_buffer_reset(&channel->buffer_uart);
+            LOG_INFO("RealTimeScheduler: Ch %d UART TX drained. UART closed.\n", i);
         }
+        semGive(g_config_mutex);
     }
 }
 

@@ -17,13 +17,20 @@ const unsigned int data_bit_table[] = {5, 6, 7, 8};
 
 int socket_send_to_middle(int sock_fd, char *buf, int buf_len)
 {
-	int ret = send(sock_fd, buf, buf_len, 0);
-	if (ret < 0)
+	int sent = 0;
+	while (sent < buf_len)
 	{
-		LOG_ERROR("send");
-		return -1;
+		ssize_t n = send(sock_fd, buf + sent, buf_len - sent, MSG_NOSIGNAL);
+		if (n < 0 && errno == EINTR)
+			continue;
+		if (n <= 0)
+		{
+			LOG_ERROR("Failed to send Real COM command response on fd=%d\n", sock_fd);
+			return ERROR;
+		}
+		sent += n;
 	}
-	return 0;
+	return OK;
 }
 
 /**
@@ -68,13 +75,18 @@ int calculate_send_parameters(ChannelState *channel)
 	return 0;
 }
 
-int uart_set_interface_type(unsigned int channel, uint8_t interface_type)
+static int uart_tx_busy_locked(ChannelState *ch, int channel)
+{
+	return ch->uart_state == UART_STATE_OPENED &&
+	       (!ring_buffer_is_empty(&ch->buffer_net) || !axi16550_Tx_IDLE(channel) ||
+	        ch->rs485_tx_active);
+}
+
+/* 调用者持有 g_config_mutex。 */
+static int uart_set_interface_type_locked(unsigned int channel, uint8_t interface_type)
 {
 	UART_TYPE hw_type;
-	ChannelState *ch;
-
-	if (channel >= NUM_PORTS)
-		return ERROR;
+	ChannelState *ch = &g_system_config.channels[channel];
 
 	switch (interface_type)
 	{
@@ -86,7 +98,89 @@ int uart_set_interface_type(unsigned int channel, uint8_t interface_type)
 		break;
 	case INTERFACE_TYPE_RS485_2WIRE:
 	case INTERFACE_TYPE_RS485_4WIRE:
-		hw_type = UART_MODE_RS485_RX; // 默认接收，即 赋值 00
+		hw_type = UART_MODE_RS485_RX;
+		break;
+	default:
+		return ERROR;
+	}
+
+	/* RS-485 重复写接收模式也会截断正在发送的数据。 */
+	if (uart_tx_busy_locked(ch, channel) &&
+	    (interface_type != ch->interface_type || interface_type == INTERFACE_TYPE_RS485_4WIRE ||
+	     interface_type == INTERFACE_TYPE_RS485_2WIRE))
+		return ERROR;
+
+	if (!axi16550TypeSet(hw_type, channel))
+		return ERROR;
+
+	ch->rs485_tx_active = 0;
+	ch->interface_type = interface_type;
+	return OK;
+}
+
+int uart_set_interface_type(unsigned int channel, uint8_t interface_type)
+{
+	if (channel >= NUM_PORTS || semTake(g_config_mutex, WAIT_FOREVER) != OK)
+		return ERROR;
+
+	int result = uart_set_interface_type_locked(channel, interface_type);
+	semGive(g_config_mutex);
+	return result;
+}
+
+static void uart_set_modem_lines_locked(ChannelState *ch, int channel,
+                                        unsigned char dtr, unsigned char rts)
+{
+	unsigned int mcr = userAxiCfgRead(channel, AXI_16550_MCR);
+	mcr &= ~(MCR_DTR | MCR_RTS);
+	if (dtr)
+		mcr |= MCR_DTR;
+	if (rts)
+		mcr |= MCR_RTS;
+
+	userAxiCfgWrite(channel, AXI_16550_MCR, mcr);
+	ch->usart_mcr_dtr = dtr;
+	ch->usart_mcr_rts = rts;
+}
+
+static int uart_baudrate_is_valid(uint32_t baudrate)
+{
+	if (baudrate == 0)
+		return 0;
+
+	uint32_t divisor = AXI_16550_CLK / 16 / baudrate;
+	return divisor > 0 && divisor <= UINT16_MAX;
+}
+
+int init_usart(ChannelState *ch, int client_socket, char *buf, int buf_len, int channel)
+{
+	if (buf_len < 5)
+		return ERROR;
+
+	const uint8_t *cmd = (const uint8_t *)buf;
+	unsigned int baud_index = cmd[2];
+	if (baud_index != 0xff && baud_index >= sizeof(bauderate_table) / sizeof(bauderate_table[0]))
+		return ERROR;
+
+	usart_info_t uart_info = {0};
+	uart_info.data_bit = data_bit_table[cmd[3] & 0x03];
+	uart_info.stop_bit = (cmd[3] & 0x04) ? USART_STOP_BIT_2 : USART_STOP_BIT_1;
+	switch (cmd[3] & 0x38)
+	{
+	case 0x00:
+		uart_info.parity = USART_PARITY_NONE;
+		break;
+	case 0x08:
+		uart_info.parity = USART_PARITY_EVEN;
+		break;
+	case 0x10:
+		uart_info.parity = USART_PARITY_ODD;
+		break;
+	case 0x18:
+		uart_info.mark = USART_IOCTL_MARK;
+		break;
+	case 0x20:
+		uart_info.space = USART_IOCTL_SPACE;
 		break;
 	default:
 		return ERROR;
@@ -95,345 +189,143 @@ int uart_set_interface_type(unsigned int channel, uint8_t interface_type)
 	if (semTake(g_config_mutex, WAIT_FOREVER) != OK)
 		return ERROR;
 
-	ch = &g_system_config.channels[channel];
-
-	/*
-     * 发送尚未结束时，禁止切换接口。
-     * 两线/四线重复应用配置也需要保护，
-     * 否则重新写入 RX 会截断正在进行的发送。
-     */
-	if (ch->uart_state == UART_STATE_OPENED && (!ring_buffer_is_empty(&ch->buffer_net) ||
-		 !axi16550_Tx_IDLE(channel) || ch->rs485_tx_active) &&
-		(interface_type != ch->interface_type || interface_type == INTERFACE_TYPE_RS485_4WIRE || ch->interface_type == INTERFACE_TYPE_RS485_4WIRE || 
-			ch->interface_type == INTERFACE_TYPE_RS485_2WIRE || interface_type == INTERFACE_TYPE_RS485_2WIRE))
-	{
-		semGive(g_config_mutex);
-		return ERROR; /* 上位机稍后重试 */
-	}
-
-	if (!axi16550TypeSet(hw_type, channel))
+	/* 0xff 表示显式波特率由后续 SETBAUD 给出。 */
+	uart_info.baud_rate = baud_index == 0xff ? ch->baudrate : bauderate_table[baud_index];
+	if (!uart_baudrate_is_valid(uart_info.baud_rate))
 	{
 		semGive(g_config_mutex);
 		return ERROR;
 	}
 
-	/* 硬件已经进入新模式，四线发送状态复位 */
-	ch->rs485_tx_active = 0;
+	int was_open = ch->uart_state == UART_STATE_OPENED;
+	int config_changed = ch->baudrate != uart_info.baud_rate ||
+	                     ch->data_bits != uart_info.data_bit ||
+	                     ch->stop_bits != uart_info.stop_bit ||
+	                     ch->parity != uart_info.parity ||
+	                     ch->mark != uart_info.mark || ch->space != uart_info.space;
+	if (config_changed && uart_tx_busy_locked(ch, channel))
+	{
+		semGive(g_config_mutex);
+		return ASPP_COMMAND_DEFERRED;
+	}
 
-	/* 保存配置的接口类型，运行期间切换方向不修改它 */
-	ch->interface_type = interface_type;
-	
+	/* 同参数的恢复命令不能复位正在发送的 FIFO。 */
+	if (!was_open || config_changed)
+	{
+		if (uart_set_interface_type_locked(channel, ch->interface_type) != OK)
+		{
+			semGive(g_config_mutex);
+			return ERROR;
+		}
+		axi165502CInit(&uart_info, channel);
+		ch->baudrate = uart_info.baud_rate;
+		ch->data_bits = uart_info.data_bit;
+		ch->stop_bits = uart_info.stop_bit;
+		ch->parity = uart_info.parity;
+		ch->mark = uart_info.mark;
+		ch->space = uart_info.space;
+		calculate_send_parameters(ch);
+	}
+	uart_set_modem_lines_locked(ch, channel, cmd[4], cmd[5]);
+	ch->usart_crtscts = cmd[6];
+
+	if (!was_open)
+	{
+		semTake(g_stats_mutex, WAIT_FOREVER);
+		ch->tx_count = 0;
+		ch->rx_count = 0;
+		semGive(g_stats_mutex);
+	}
+	ch->uart_state = UART_STATE_OPENED;
+	ch->uart_close_pending = 0;
 	semGive(g_config_mutex);
-	return OK;
+
+	char response[5] = {buf[0], 0x03, 0, 0, 0};
+	return socket_send_to_middle(client_socket, response, sizeof(response));
 }
 
-int init_usart(ChannelState *uart_instance, int client_socket, char *buf, int buf_len, int channel)
+int usart_set_baudrate(ChannelState *ch, int client_socket, char *buf, int buf_len, int channel)
 {
-	int ret;
-	unsigned char stop_bit;
-	unsigned char data_bit;
-	usart_info_t uart_info;
+	if (buf_len < 4)
+		return ERROR;
 
-	memset(&uart_info, 0, sizeof(uart_info));
-
-	char pack_buf[5] = {0};
-	if (buf_len < 0)
+	const uint8_t *bytes = (const uint8_t *)buf + ASPP_HEADER_LEN;
+	uint32_t baudrate = (uint32_t)bytes[0] << 24 | (uint32_t)bytes[1] << 16 |
+	                    (uint32_t)bytes[2] << 8 | bytes[3];
+	if (!uart_baudrate_is_valid(baudrate))
 	{
-		return -1;
+		/* WQ Linux 驱动发送本机字节序，兼容可用的显式波特率。 */
+		baudrate = (uint32_t)bytes[3] << 24 | (uint32_t)bytes[2] << 16 |
+		           (uint32_t)bytes[1] << 8 | bytes[0];
+		if (!uart_baudrate_is_valid(baudrate))
+			return ERROR;
 	}
 
-	/*设置串口波特率*/
-	int baud_rate = bauderate_table[(int)buf[2]];
-	uart_instance->baudrate = baud_rate;
-	uart_info.baud_rate = baud_rate;
-	LOG_DEBUG("baud_rate: %d\n", uart_instance->baudrate);
-
-	/*data bit*/
-	data_bit = ((int)buf[3]) & 0x03;
-	uart_instance->data_bits = data_bit_table[data_bit];
-	uart_info.data_bit = data_bit_table[data_bit];
-	LOG_DEBUG("data_bit: %d\n", uart_instance->data_bits);
-
-	/*stop bit*/
-	stop_bit = ((int)buf[3]) & 0x04;
-	if (stop_bit == 0)
+	if (semTake(g_config_mutex, WAIT_FOREVER) != OK)
+		return ERROR;
+	if (ch->baudrate != (int)baudrate)
 	{
-		uart_instance->stop_bits = USART_STOP_BIT_1;
-		uart_info.stop_bit = USART_STOP_BIT_1;
-		LOG_DEBUG("stop_bit: %d\n", uart_instance->stop_bits);
+		if (uart_tx_busy_locked(ch, channel))
+		{
+			semGive(g_config_mutex);
+			return ASPP_COMMAND_DEFERRED;
+		}
+		axi16550BaudInit(channel, baudrate);
+		ch->baudrate = baudrate;
+		calculate_send_parameters(ch);
 	}
-	else
-	{
-		uart_instance->stop_bits = USART_STOP_BIT_2;
-		uart_info.stop_bit = USART_STOP_BIT_2;
-		LOG_DEBUG("stop_bit: %d\n", uart_instance->stop_bits);
-	}
+	semGive(g_config_mutex);
 
-	/* 0b111000，用于提取第3 - 5位*/
-	int last_mask = ((int)buf[3]) & 0x38;
-	switch (last_mask)
-	{
-	case 0x00:
-		LOG_DEBUG("Parity: None\n");
-		uart_instance->parity = USART_PARITY_NONE;
-		uart_info.parity = USART_PARITY_NONE;
-		break;
-	case 0x08:
-		LOG_DEBUG("Parity: Even\n");
-		uart_instance->parity = USART_PARITY_EVEN;
-		uart_info.parity = USART_PARITY_EVEN;
-		break;
-	case 0x10:
-		LOG_DEBUG("Parity: Odd\n");
-		uart_instance->parity = USART_PARITY_ODD;
-		uart_info.parity = USART_PARITY_ODD;
-		break;
-	case 0x18:
-		LOG_DEBUG("Parity: Mark\n");
-		uart_instance->mark = USART_IOCTL_MARK;
-		uart_info.mark = USART_IOCTL_MARK;
-		break;
-	case 0x20:
-		LOG_DEBUG("Parity: Space\n");
-		uart_instance->space = USART_IOCTL_SPACE;
-		uart_info.space = USART_IOCTL_SPACE;
-		break;
-	default:
-		LOG_ERROR("Unknown parity configuration:%02x \n", last_mask);
-		break;
-	}
-	/*调用AXI_api设置串口相关寄存器*/
-	axi165502CInit(&uart_info, channel);
-
-	uart_instance->usart_mcr_dtr = (unsigned char)buf[4];
-
-	uart_instance->usart_mcr_rts = (unsigned char)buf[5];
-
-	/* 获取当前 MCR 寄存器值*/
-	unsigned int mcr_reg = userAxiCfgRead(channel, AXI_16550_MCR);
-
-	/*设置 DTR 位*/
-	if (uart_instance->usart_mcr_dtr)
-	{
-		mcr_reg |= MCR_DTR;
-	}
-	else
-	{
-		mcr_reg &= ~MCR_DTR;
-	}
-
-	/* 设置 RTS 位*/
-	if (uart_instance->usart_mcr_rts)
-	{
-		mcr_reg |= MCR_RTS;
-	}
-	else
-	{
-		mcr_reg &= ~MCR_RTS;
-	}
-
-	uart_instance->usart_crtscts = (unsigned char)buf[6];
-
-	calculate_send_parameters(uart_instance);
-	if (uart_set_interface_type(channel, uart_instance->interface_type) != OK)
-	{
-		LOG_ERROR("Failed to apply interface type for channel %d\n", channel);
-		return -1;
-	}
-
-	semTake(g_stats_mutex, WAIT_FOREVER);
-	if (uart_instance->uart_state != UART_STATE_OPENED)
-	{
-		uart_instance->tx_count = 0;
-		uart_instance->rx_count = 0;
-	}
-	uart_instance->uart_state = UART_STATE_OPENED;
-	semGive(g_stats_mutex);
-
-	// 打包数据
-	pack_buf[0] = buf[0];
-	pack_buf[1] = 0x3;
-	pack_buf[2] = 0x0;
-	pack_buf[3] = 0x0;
-	pack_buf[4] = 0x0;
-	/*返回数据给中间件*/
-	ret = socket_send_to_middle(client_socket, pack_buf, sizeof(pack_buf));
-	if (ret < 0)
-	{
-		return -1;
-	}
-
-	return 0;
-}
-
-int usart_set_baudrate(ChannelState *uart_instance, int client_socket, char *buf, int buf_len, int channel)
-{
-	int ret;
-	unsigned int baud_rate;
-
-	/*提取波特率:假设高位在前*/
-	baud_rate = buf[2] << 24 | buf[3] << 16 | buf[4] << 8 | buf[5];
-	uart_instance->baudrate = baud_rate;
-
-	LOG_DEBUG("baud_rate: %d\n", baud_rate);
-	if (buf_len < 0)
-	{
-		return -1;
-	}
-
-	// 调用AXI_api设置串口波特率
-	// 打包数据
-	axi16550BaudInit(channel, uart_instance->baudrate);
-
-	char response[3] = {0};
-	response[0] = buf[0];
-	response[1] = 'O';
-	response[2] = 'K';
-	/*返回数据给中间件*/
-	ret = socket_send_to_middle(client_socket, response, sizeof(response));
-	if (ret < 0)
-	{
-		return -1;
-	}
-
-	return 0;
+	char response[3] = {buf[0], 'O', 'K'};
+	return socket_send_to_middle(client_socket, response, sizeof(response));
 }
 
 int usart_set_xon_xoff(int client_socket, int channel, char *buf, int buf_len)
 {
-	int ret;
-	if (buf_len < 0)
-	{
-		return -1;
-	}
+	if (channel < 0 || channel >= NUM_PORTS || buf_len < 2 ||
+	    semTake(g_config_mutex, WAIT_FOREVER) != OK)
+		return ERROR;
 
-	if (channel < 0)
-	{
-		return -1;
-	}
+	/* WQ 驱动下发两个原始控制字符。 */
+	ChannelState *ch = &g_system_config.channels[channel];
+	ch->IX_on = (unsigned char)buf[2];
+	ch->IX_off = (unsigned char)buf[3];
+	semGive(g_config_mutex);
 
-	/*字符串比较VSTART和VSTOP从buf[2]开始*/
-	if ((strcmp(&buf[2], "VSTART")) == 0)
-	{
-		/*调用AXI_api设置XonXoff*/
-		/*		send_xon_xoff_char(channel, 1); // 发送 XON*/
-	}
-	else if ((strcmp(&buf[2], "VSTOP")) == 0)
-	{
-		/*		send_xon_xoff_char(channel, 0); // 发送 XOFF*/
-	}
-
-	/*返回数据给中间件*/
-	char response[3] = {0};
-	response[0] = buf[0];
-	response[1] = 'O';
-	response[2] = 'K';
-	/*返回数据给中间件*/
-	ret = socket_send_to_middle(client_socket, response, sizeof(response));
-	if (ret < 0)
-	{
-		return -1;
-	}
-
-	return 0;
+	char response[3] = {buf[0], 'O', 'K'};
+	return socket_send_to_middle(client_socket, response, sizeof(response));
 }
 
 int usart_set_tx_fifo(int client_socket, int channel, char *buf, int buf_len)
 {
-	unsigned fifo_size;
-	int ret;
+	if (channel < 0 || channel >= NUM_PORTS || buf_len < 1)
+		return ERROR;
 
-	fifo_size = buf[2];
-
-	if (channel < 0)
-	{
-		return -1;
-	}
-	if (buf_len < 0)
-	{
-		return -1;
-	}
-
-	// 根据 fifo_size 配置 16550 FCR 寄存器*/
-	unsigned char fcr_value = FCR_FIFO_ENABLE;
-	if (fifo_size == 1)
-	{
-		fcr_value |= FCR_TRIGGER_LEVEL_1;
-	}
-	else if (fifo_size == 16)
-	{
-		fcr_value |= FCR_TRIGGER_LEVEL_16;
-	}
-
-	char response[3] = {0};
-	response[0] = buf[0];
-	response[1] = 'O';
-	response[2] = 'K';
-	/*返回数据给中间件*/
-	ret = socket_send_to_middle(client_socket, response, sizeof(response));
-
-	if (ret < 0)
-	{
-		return -1;
-	}
-
-	return 0;
+	/* 沿用设备的 FPGA FIFO 配置，保留驱动需要的应答。 */
+	char response[3] = {buf[0], 'O', 'K'};
+	return socket_send_to_middle(client_socket, response, sizeof(response));
 }
 
 int usart_set_line_control(int client_socket, int channel, char *buf, int buf_len)
 {
-	int ret;
-	unsigned char dtr_val = buf[2];
-	unsigned char rts_val = buf[3];
+	if (channel < 0 || channel >= NUM_PORTS || buf_len < 2 ||
+	    semTake(g_config_mutex, WAIT_FOREVER) != OK)
+		return ERROR;
 
-	if (channel < 0)
-	{
-		return -1;
-	}
-
-	if (buf_len < 0)
-	{
-		return -1;
-	}
-
-	/* 获取当前 MCR 寄存器值*/
-	unsigned int mcr_reg = userAxiCfgRead(channel, AXI_16550_MCR);
-
-	/* 设置 DTR 位*/
-	if (dtr_val)
-	{
-		mcr_reg |= MCR_DTR;
-	}
+	ChannelState *ch = &g_system_config.channels[channel];
+	unsigned char dtr = (unsigned char)buf[2];
+	unsigned char rts = (unsigned char)buf[3];
+	if (ch->uart_state == UART_STATE_OPENED)
+		uart_set_modem_lines_locked(ch, channel, dtr, rts);
 	else
 	{
-		mcr_reg &= ~MCR_DTR;
+		ch->usart_mcr_dtr = dtr;
+		ch->usart_mcr_rts = rts;
 	}
+	semGive(g_config_mutex);
 
-	/* 设置 RTS 位*/
-	if (rts_val)
-	{
-		mcr_reg |= MCR_RTS;
-	}
-	else
-	{
-		mcr_reg &= ~MCR_RTS;
-	}
-
-	/* 写入更新后的 MCR 寄存器值*/
-	userAxiCfgWrite(channel, AXI_16550_MCR, mcr_reg);
-
-	char response[3] = {0};
-	response[0] = buf[0];
-	response[1] = 'O';
-	response[2] = 'K';
-	/*返回数据给中间件*/
-	ret = socket_send_to_middle(client_socket, response, sizeof(response));
-	if (ret < 0)
-	{
-		return -1;
-	}
-
-	return 0;
+	char response[3] = {buf[0], 'O', 'K'};
+	return socket_send_to_middle(client_socket, response, sizeof(response));
 }
 
 int usart_set_xon(int client_socket, int channel, char *buf, int buf_len)
@@ -496,7 +388,6 @@ int usart_set_xoff(int client_socket, int channel, char *buf, int buf_len)
 
 int usart_set_start_break(int client_socket, int channel, char *buf, int buf_len)
 {
-	axi16550SendStartBreak(channel);
 	int ret;
 	char response[3] = {0};
 	response[0] = buf[0];
@@ -511,6 +402,11 @@ int usart_set_start_break(int client_socket, int channel, char *buf, int buf_len
 	{
 		return -1;
 	}
+
+	if (semTake(g_config_mutex, WAIT_FOREVER) != OK)
+		return ERROR;
+	axi16550SendStartBreak(channel);
+	semGive(g_config_mutex);
 
 	/*返回数据给中间件*/
 	ret = socket_send_to_middle(client_socket, response, sizeof(response));
@@ -525,7 +421,6 @@ int usart_set_start_break(int client_socket, int channel, char *buf, int buf_len
 int usart_set_stop_break(int client_socket, int channel, char *buf, int buf_len)
 {
 	int ret;
-	axi16550SendStopBreak(channel);
 	char response[3] = {0};
 	response[0] = buf[0];
 	response[1] = 'O';
@@ -539,6 +434,11 @@ int usart_set_stop_break(int client_socket, int channel, char *buf, int buf_len)
 	{
 		return -1;
 	}
+
+	if (semTake(g_config_mutex, WAIT_FOREVER) != OK)
+		return ERROR;
+	axi16550SendStopBreak(channel);
+	semGive(g_config_mutex);
 
 	/*返回数据给中间件*/
 	ret = socket_send_to_middle(client_socket, response, sizeof(response));
@@ -599,100 +499,48 @@ int usart_close(int client_socket, char *buf, int buf_len)
 	return 0;
 }
 
-void handle_command(ChannelState *uart_instance, int client_socket, char *buf, int buf_len, int channel)
+int handle_command(ChannelState *uart_instance, int client_socket, char *buf, int buf_len, int channel)
 {
-	/*解析数据*/
-	uint8_t cmd = buf[0];
-	uint8_t data_len = buf[1];
+	if (channel < 0 || channel >= NUM_PORTS || buf_len < ASPP_HEADER_LEN)
+		return ERROR;
 
-	if (buf_len < 0)
-	{
-		return;
-	}
+	uint8_t cmd = (uint8_t)buf[0];
+	uint8_t data_len = (uint8_t)buf[1];
+	if (buf_len != ASPP_HEADER_LEN + data_len)
+		return ERROR;
 
 	switch (cmd)
 	{
 	case ASPP_CMD_PORT_INIT:
-	{
-		init_usart(uart_instance, client_socket, buf, data_len, channel);
-		break;
-	}
-	case ASPP_CMD_NOTIFY:
-	{
-
-		break;
-	}
+		return init_usart(uart_instance, client_socket, buf, data_len, channel);
 	case ASPP_CMD_SETBAUD:
-	{
-		usart_set_baudrate(uart_instance, client_socket, buf, data_len, channel);
-		break;
-	}
-
+		return usart_set_baudrate(uart_instance, client_socket, buf, data_len, channel);
 	case ASPP_CMD_XONXOFF:
-	{
-		usart_set_xon_xoff(client_socket, channel, buf, data_len);
-		break;
-	}
-
+		return usart_set_xon_xoff(client_socket, channel, buf, data_len);
 	case ASPP_CMD_TX_FIFO:
-	{
-		usart_set_tx_fifo(client_socket, channel, buf, data_len);
-		break;
-	}
-
+		if (data_len < 1)
+			return ERROR;
+		return usart_set_tx_fifo(client_socket, channel, buf, data_len);
 	case ASPP_CMD_LINECTRL:
-	{
-		usart_set_line_control(client_socket, channel, buf, data_len);
-		break;
-	}
-
+		return usart_set_line_control(client_socket, channel, buf, data_len);
 	case ASPP_CMD_SETXON:
-	{
-		usart_set_xon(client_socket, channel, buf, data_len);
-		break;
-	}
-
+		return usart_set_xon(client_socket, channel, buf, data_len);
 	case ASPP_CMD_SETXOFF:
-	{
-		usart_set_xoff(client_socket, channel, buf, data_len);
-		break;
-	}
-
+		return usart_set_xoff(client_socket, channel, buf, data_len);
 	case ASPP_CMD_START_BREAK:
-	{
-		usart_set_start_break(client_socket, channel, buf, data_len);
-		break;
-	}
-
+		return usart_set_start_break(client_socket, channel, buf, data_len);
 	case ASPP_CMD_STOP_BREAK:
-	{
-		usart_set_stop_break(client_socket, channel, buf, data_len);
-		break;
-	}
-
-	case ASPP_CMD_ALIVE:
-	{
-		/*usart_report_hearbeat(client_socket, buf, data_len);*/
-		break;
-	}
-
+		return usart_set_stop_break(client_socket, channel, buf, data_len);
 	case ASPP_CMD_WAIT_OQUEUE:
-	{
-		usart_report_queue(client_socket, buf, data_len);
-		break;
-	}
-
+		return usart_report_queue(client_socket, buf, data_len);
 	case ASPP_CMD_FLUSH:
-	{
-		usart_close(client_socket, buf, data_len);
-		break;
-	}
-
+		return usart_close(client_socket, buf, data_len);
+	case ASPP_CMD_NOTIFY:
+	case ASPP_CMD_ALIVE:
+		return OK;
 	default:
-	{
 		LOG_ERROR("Unknown command: %d\n", cmd);
-		break;
-	}
+		return OK;
 	}
 }
 

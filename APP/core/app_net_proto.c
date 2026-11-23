@@ -16,7 +16,7 @@ static int set_all_ports_mode(unsigned char op_mode, const unsigned char *op_mod
 static int validate_and_update_port_mode(ChannelState *channel, unsigned char op_mode, const unsigned char *op_mode_data);
 static void handle_query_op_mode(int session_index, const unsigned char *frame);
 static void handle_read_op_mode(int session_index, const unsigned char *frame);
-static void handle_set_op_mode(int session_index, const unsigned char *frame);
+static void handle_set_op_mode(int session_index, const unsigned char *frame, int len);
 static void send_op_mode_response(int fd, unsigned char cmd_id, unsigned char sub_id, const unsigned char *data, int data_len);
 
 static void send_response(int fd, const unsigned char *data, int len);
@@ -516,8 +516,6 @@ void handle_serial_settings_request(int session_index, const unsigned char *fram
         int data_offset = 0;
         unsigned char port_index = data[data_offset++];
 
-        
-
         LOG_DEBUG("  Action: Write Single Serial Port Setting.");
         LOG_DEBUG("  [RECEIVED] Target Port Index: %d", port_index);
 
@@ -714,16 +712,12 @@ static int pack_operating_mode_params(const ChannelState *channel, unsigned char
  */
 void handle_operating_settings_request(int session_index, const unsigned char *frame, int len)
 {
+    if (frame == NULL || len < MIN_FRAME_SIZE)
+        return;
+
     unsigned char sub_id = frame[3];
 
-    LOG_DEBUG("ConfigTask: Handling Operating Settings Request (0x05), Sub ID: 0x%02X, len: %d",
-              sub_id, len);
-
-    if (len < 5)
-    {
-        LOG_WARN("Invalid Operating Settings Request frame length: %d", len);
-        return;
-    }
+    LOG_DEBUG("ConfigTask: Handling Operating Settings Request (0x05), Sub ID: 0x%02X, len: %d", sub_id, len);
 
     switch (sub_id)
     {
@@ -736,7 +730,7 @@ void handle_operating_settings_request(int session_index, const unsigned char *f
         break;
 
     case 0x02: // 设置串口操作模式
-        handle_set_op_mode(session_index, frame);
+        handle_set_op_mode(session_index, frame, len);
         break;
 
     default:
@@ -835,45 +829,66 @@ static void handle_read_op_mode(int session_index, const unsigned char *frame)
     send_op_mode_response(s_sessions[session_index].fd, 0x05, 0x01, response, offset);
 }
 
+static int operating_mode_param_size(unsigned char op_mode)
+{
+    switch (op_mode)
+    {
+    case OP_MODE_REAL_COM:
+        return 11;
+    case OP_MODE_TCP_SERVER:
+        return 17;
+    case OP_MODE_TCP_CLIENT:
+        return 44;
+    case OP_MODE_UDP:
+        return 49;
+    case OP_MODE_DISABLED:
+        return 0;
+    default:
+        return -1;
+    }
+}
+
 /**
  * @brief 处理设置操作模式请求(0x02)
  */
-static void handle_set_op_mode(int session_index, const unsigned char *frame)
+static void handle_set_op_mode(int session_index, const unsigned char *frame, int len)
 {
-    unsigned char response[1024];
-    int offset = 0;
-    unsigned char query_type = frame[4];
-    unsigned char op_mode = frame[5];
+    /* 至少有 4 字节头部、1 字节查询类型、2 字节帧尾 */
+    unsigned char query_type = len >= 7 ? frame[4] : 0;
     int success = 0;
 
-    LOG_DEBUG("Setting operation mode: query_type=0x%02X, op_mode=0x%02X",
-              query_type, op_mode);
-
-    if (query_type == 0x01)
-    { // 设置单个端口
-        unsigned char port_index = frame[6];
-        success = set_single_port_mode(port_index, op_mode, &frame[7]);
-    }
-    else if (query_type == 0xFF)
-    { // 设置所有端口
-        const unsigned char *op_mode_data = &frame[6];
-        success = set_all_ports_mode(op_mode, op_mode_data);
-    }
-    else
+    if (len >= 8)
     {
-        LOG_WARN("Unknown query type: 0x%02X", query_type);
+        unsigned char op_mode = frame[5];
+        int param_size = operating_mode_param_size(op_mode);
+        int param_offset = 0;
+
+        if (query_type == 0x01)
+        {
+            param_offset = 7; /* 单端口包含端口编号 */
+        }
+
+        else if (query_type == 0xFF)
+        {
+            param_offset = 6; /* 全部端口 */
+        }
+
+        if (param_offset != 0 && param_size >= 0 && len == param_offset + param_size + 2)
+        {
+            if (query_type == 0x01)
+            {
+                success = set_single_port_mode(frame[6], op_mode, &frame[param_offset]);
+            }
+            else
+            {
+                success = set_all_ports_mode(op_mode, &frame[param_offset]);
+            }
+        }
     }
 
-    // 构造响应
-    response[offset++] = 0xA5;
-    response[offset++] = 0xA5;
-    response[offset++] = 0x05; // command id
-    response[offset++] = 0x02; // sub id
-    response[offset++] = query_type;
-    response[offset++] = success ? 0x01 : 0x02;
+    unsigned char response[] = {0xA5, 0xA5, 0x05, 0x02, query_type, success ? 0x01 : 0x02};
 
-    // 发送响应
-    send_op_mode_response(s_sessions[session_index].fd, 0x05, 0x02, response, offset);
+    send_op_mode_response(s_sessions[session_index].fd, 0x05, 0x02, response, sizeof(response));
 }
 
 /**
@@ -974,6 +989,23 @@ static int validate_and_update_port_mode(ChannelState *channel, unsigned char op
                                          const unsigned char *op_mode_data)
 {
     int i, offset = 0;
+    if (channel == NULL || op_mode_data == NULL)
+    {
+        return 0;
+    }
+
+    /* 这套协议中，两种模式的最大连接数字段偏移不同 */
+    if (op_mode == OP_MODE_REAL_COM || op_mode == OP_MODE_TCP_SERVER)
+    {
+        unsigned int requested_limit =
+            op_mode_data[op_mode == OP_MODE_REAL_COM ? 1 : 3];
+
+        if (requested_limit < 1 ||
+            requested_limit > MAX_CLIENTS_PER_CHANNEL)
+        {
+            return 0;
+        }
+    }
 
     // 保存旧的操作模式，以便在设置失败时恢复
     unsigned char old_op_mode = channel->op_mode;

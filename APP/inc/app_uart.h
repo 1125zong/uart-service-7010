@@ -28,6 +28,9 @@
 #define ASPP_NOTIFY_BREAK       0x10
 #define ASPP_NOTIFY_MSR_CHG     0x20
 
+#define ASPP_HEADER_LEN         2
+#define ASPP_COMMAND_DEFERRED   1
+
 /* UART MSR flags */
 #define UART_MSR_CTS  0x10
 #define UART_MSR_DSR  0x20
@@ -60,7 +63,7 @@ int uart_set_interface_type(unsigned int channel, uint8_t interface_type);
 int socket_send_to_middle(int sock_fd, char *buf, int buf_len);
 int init_usart(ChannelState *uart_instance, int client_socket, char *buf,int buf_len, int channel);
 int usart_set_baudrate(ChannelState *uart_instance, int client_socket,char *buf, int buf_len, int channel);
-void handle_command(ChannelState *uart_instance, int client_socket,char *buf, int buf_len, int channel);
+int handle_command(ChannelState *uart_instance, int client_socket,char *buf, int buf_len, int channel);
 
 int usart_set_xon_xoff(int client_socket, int channel, char *buf, int buf_len);
 int usart_set_tx_fifo(int client_socket, int channel, char *buf, int buf_len);

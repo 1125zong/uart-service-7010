@@ -392,6 +392,8 @@ typedef struct
     /* -- 运行时状态 -- */
 	UartPhysicalState   uart_state;   
     unsigned char rs485_tx_active;    // 0：表示发送关闭， 1表示开启
+    uint8_t uart_close_pending;          // 无 Data 客户端时，等 TX 排空再关闭
+    unsigned int uart_reconfigure_waiters; // 等旧数据发完的 CMD 会话数
     
     DataChannelInfo     data_net_info;
     CmdChannelInfo      cmd_net_info;

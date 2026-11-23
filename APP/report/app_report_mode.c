@@ -16,93 +16,48 @@
  */
 void handle_read_operating_mode(int client_fd, unsigned char *data, int len)
 {
-    uint8_t response[1024];
-    int offset = 0;  
-    int i;
-    uint8_t main_id = data[2];
-    uint8_t sub_id  = data[3];
-    uint8_t port_index;
-    uint8_t op_mode;
-    uint8_t num_ports;
-    
-    if(len < 0)
+    if (data == NULL || len < 6)
     {
-        LOG_ERROR("  Invalid data length: %d\n", len);
+        return;
     }
-    LOG_INFO("  Action: Operating Mode Settings, MainID=0x%02X, SubID=0x%02X\n", main_id, sub_id);
-    
-    switch (sub_id)
+
+    const uint8_t sub_id = data[3];
+    const int all_ports = sub_id == 0x02;
+
+    if ((sub_id != 0x01 && sub_id != 0x02) || len != 7 || (all_ports && data[4] != 0xFF) || (!all_ports && (data[4] < 1 || data[4] > NUM_PORTS)))
     {
-        case 0x01:
-        	port_index = data[4];
-            
-            /* 帧头 */
-            response[offset++] = 0xA5; 
-            response[offset++] = 0xA5;
-            response[offset++] = main_id; 
-            response[offset++] = sub_id;
-            response[offset++] = port_index;
+        send_report_response(client_fd, 0x06, sub_id, FAILED);
+        return;
+    }
 
-            semTake(g_config_mutex, WAIT_FOREVER);
-            {
-                int ch_idx = port_index - 1;
-                ChannelState* ch = &g_system_config.channels[ch_idx];
-                
-                response[offset++] = (unsigned char)ch->op_mode;
-                
-                LOG_INFO("  Port %d: Op Mode = %d\n", port_index, ch->op_mode);
-                
-            }
+    if (semTake(g_config_mutex, WAIT_FOREVER) != OK)
+    {
+        send_report_response(client_fd, 0x06, sub_id, FAILED);
+        return;
+    }
 
-            semGive(g_config_mutex); 
-            /* 帧尾 */
-            response[offset++] = 0x5A; 
-            response[offset++] = 0x5A;
-            send(client_fd, (char*)response, offset, 0);
-            LOG_INFO("  Sent Operating Mode Settings response (%d bytes)\n", offset);
+    uint8_t response[4 + 1 + NUM_PORTS * 4 + 2] = {0xA5, 0xA5, 0x06, sub_id};
+    int offset = 4;
+    const int first_port = all_ports ? 1 : data[4];
+    const int count = all_ports ? NUM_PORTS : 1;
 
-            break;
-            
-        case 0x02:
+    if (all_ports)
+    {
+        response[offset++] = count;
+    }
 
-            /* 读取全部端口的操作模式 */
-            /* 帧头 */
-            response[offset++] = 0xA5; 
-            response[offset++] = 0xA5;
-            response[offset++] = main_id; 
-            response[offset++] = sub_id;
+    for (int port = first_port; port < first_port + count; ++port)
+    {
+        const ChannelState *ch = &g_system_config.channels[port - 1];
+        response[offset++] = port;
+        response[offset++] = ch->op_mode;
+        response[offset++] = ch->max_connections;
+        response[offset++] = ch->tcp_alive_check_time_min;
+    }
 
-            semTake(g_config_mutex, WAIT_FOREVER);
-            
-            response[offset++] = NUM_PORTS;
-            
-            for (i = 0; i < NUM_PORTS; i++)
-            {
-                ChannelState* ch = &g_system_config.channels[i];
-                response[offset++] = i + 1;                  /* 端口号 */
-                response[offset++] = (unsigned char)ch->op_mode; /* 操作模式 */
-                LOG_INFO("  Port %d: Op Mode = %d\n", i + 1, ch->op_mode);
-            }
-            
-            semGive(g_config_mutex);
-            
-            /* 帧尾 */
-            response[offset++] = 0x5A; 
-            response[offset++] = 0x5A;
-            
-            send(client_fd, (char*)response, offset, 0);
-            LOG_INFO("  Sent all ports operating modes (%d bytes, %d ports)\n", offset, NUM_PORTS);
-            break;
-            
-        case 0x03:
-            /* 预留功能 */
-            LOG_INFO("  SubID 0x03: Reserved\n");
-            send_report_response(client_fd, 0x06, sub_id, FAILED);
-            break;
-            
-        default:
-            LOG_ERROR("  ERROR: Unsupported sub_id 0x%02X\n", sub_id);
-            send_report_response(client_fd, 0x06, sub_id, FAILED);
-            break;
-    }   
+    semGive(g_config_mutex);
+
+    response[offset++] = 0x5A;
+    response[offset++] = 0x5A;
+    send(client_fd, (const char *)response, offset, 0);
 }

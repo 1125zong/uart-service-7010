@@ -24,18 +24,17 @@
 /* ------------------ Private Function Prototypes ------------------ */
 static void cleanup_config_connection(int index);
 static int handle_config_client(int index);
+static int handle_serial_port_command(ClientSession *session);
 static void process_command_frame(int session_index, const unsigned char *frame, int len);
 
 /* ------------------ Module-level static variables ------------------ */
 ClientSession s_sessions[MAX_CONFIG_CLIENTS];
 static int s_num_active_sessions = 0;
 
-extern int g_active_tcp_connections[NUM_PORTS];
-
 /* ------------------ Global Variable Definitions ------------------ */
 
 /**
- * @brief ConfigTaskManager 的主入口函数
+ * @brief ConfigTaskManager 的主入口函数，用来处理驱动发来的CMD命令
  */
 void *ConfigTaskManager(void *arg)
 {
@@ -66,55 +65,66 @@ void *ConfigTaskManager(void *arg)
         // cmd
         while (msgQReceive(g_config_conn_q, (char *)&msg, sizeof(msg), NO_WAIT) == sizeof(NewConnectionMsg))
         {
-            if (s_num_active_sessions < MAX_CONFIG_CLIENTS)
+            /* 先检查全局会话表容量，未接纳的连接不增加任何计数 */
+            if (s_num_active_sessions >= MAX_CONFIG_CLIENTS)
             {
-                int new_index = s_num_active_sessions;
-                s_sessions[new_index].fd = msg.client_fd;
-                s_sessions[new_index].type = msg.type;
-                s_sessions[new_index].channel_index = msg.channel_index;
-                s_sessions[new_index].last_activity_time = time(NULL);
-                s_sessions[new_index].rx_bytes = 0;
-                s_num_active_sessions++;
-                LOG_DEBUG("ConfigTaskManager: Accepted new connection fd=%d, type=%d, channel_index=%d. Total sessions: %d\n",
-                          msg.client_fd, msg.type, msg.channel_index, s_num_active_sessions);
-
-                if (msg.type == CONN_TYPE_REALCOM_CMD && msg.channel_index >= 0)
-                {
-                    int i = msg.channel_index;
-                    ChannelState *channel = &g_system_config.channels[i];
-
-                    semTake(g_config_mutex, WAIT_FOREVER);
-                    if (channel->cmd_net_info.num_clients < MAX_CLIENTS_PER_CHANNEL)
-                    {
-                        int client_idx = channel->cmd_net_info.num_clients;
-                        channel->cmd_net_info.client_fds[client_idx] = msg.client_fd;
-
-                        if (channel->cmd_net_info.num_clients == 0)
-                        {
-                            // 第一个客户端连接，状态从 LISTENING 变为 CONNECTED
-                            channel->cmd_net_info.state = NET_STATE_CONNECTED;
-                        }
-                        channel->cmd_net_info.num_clients++;
-
-                        LOG_INFO("ConfigTask: Ch %d accepted new CMD client fd=%d. Total CMD clients for this port: %d\n", i, msg.client_fd, channel->cmd_net_info.num_clients);
-                    }
-                    else
-                    {
-                        // 如果此通道的命令连接已满，则拒绝
-                        LOG_ERROR("ConfigTask: Ch %d CMD client limit reached. Rejecting fd=%d\n", i, msg.client_fd);
-                        close(msg.client_fd);
-                        // 因为连接被拒绝，所以不将会话加入 s_sessions 列表
-                        s_num_active_sessions--;
-                    }
-                    semGive(g_config_mutex);
-                }
-                LOG_INFO("ConfigTask: Accepted new config connection fd=%d\n", msg.client_fd);
-            }
-            else
-            {
-                LOG_ERROR("ConfigTaskManager: Max config clients reached. Rejecting fd=%d\n", msg.client_fd);
+                LOG_WARN("Config session table full, rejecting fd=%d\n", msg.client_fd);
                 close(msg.client_fd);
+                continue;
             }
+
+            /* 串口命令连接与数据连接分别限制 */
+            if (msg.type == CONN_TYPE_REALCOM_CMD)
+            {
+                if (msg.channel_index < 0 || msg.channel_index >= NUM_PORTS)
+                {
+                    close(msg.client_fd);
+                    continue;
+                }
+
+                if (semTake(g_config_mutex, WAIT_FOREVER) != OK)
+                {
+                    close(msg.client_fd);
+                    continue;
+                }
+
+                ChannelState *channel = &g_system_config.channels[msg.channel_index];
+
+                int connection_limit = channel->max_connections;
+                int client_count = channel->cmd_net_info.num_clients;
+
+                if (connection_limit < 1 || connection_limit > MAX_CLIENTS_PER_CHANNEL ||
+                    client_count < 0 || client_count >= connection_limit ||
+                    client_count >= MAX_CLIENTS_PER_CHANNEL)
+                {
+                    semGive(g_config_mutex);
+
+                    LOG_WARN("Ch %d CMD connection rejected: count=%d, limit=%d\n", msg.channel_index, client_count, connection_limit);
+
+                    close(msg.client_fd);
+                    continue;
+                }
+
+                channel->cmd_net_info.client_fds[client_count] = msg.client_fd;
+                channel->cmd_net_info.num_clients = client_count + 1;
+                channel->cmd_net_info.state = NET_STATE_CONNECTED;
+
+                semGive(g_config_mutex);
+            }
+
+            /* 所有检查通过后，才正式加入会话表 */
+            int new_index = s_num_active_sessions;
+
+            s_sessions[new_index].fd = msg.client_fd;
+            s_sessions[new_index].type = msg.type;
+            s_sessions[new_index].channel_index = msg.channel_index;
+            s_sessions[new_index].last_activity_time = time(NULL);
+            s_sessions[new_index].rx_bytes = 0;
+            s_sessions[new_index].uart_command_deferred = 0;
+
+            s_num_active_sessions++;
+
+            LOG_INFO("Accepted config connection fd=%d, type=%d, channel=%d\n", msg.client_fd, msg.type, msg.channel_index);
         }
 
         if (s_num_active_sessions == 0)
@@ -127,10 +137,19 @@ void *ConfigTaskManager(void *arg)
         /* ------------------ 2. 构建select监听集合 ------------------ */
         fd_set read_fds;
         int max_fd = 0;
+        int has_deferred_command = 0;
         FD_ZERO(&read_fds);
 
         for (i = 0; i < s_num_active_sessions; i++)
         {
+            if (s_sessions[i].uart_command_deferred)
+            {
+                has_deferred_command = 1;
+                if (s_sessions[i].rx_bytes == MAX_COMMAND_LEN)
+                {
+                    continue; /* 留出空间后再读取这个连接 */
+                }
+            }
             FD_SET(s_sessions[i].fd, &read_fds);
             if (s_sessions[i].fd > max_fd)
             {
@@ -139,7 +158,12 @@ void *ConfigTaskManager(void *arg)
         }
 
         /* ------------------ 3. 阻塞等待事件 ------------------ */
-        struct timeval timeout = {5, 0}; // 5秒超时
+        struct timeval timeout = {5, 0};
+        if (has_deferred_command)
+        {
+            timeout.tv_sec = 0;
+            timeout.tv_usec = 10000;
+        }
         int ret = select(max_fd + 1, &read_fds, NULL, NULL, &timeout);
 
         if (ret < 0)
@@ -166,7 +190,11 @@ void *ConfigTaskManager(void *arg)
                 s_sessions[i].last_activity_time = now;
                 connection_alive = handle_config_client(i);
             }
-            else if (ret == 0)
+            else if (s_sessions[i].uart_command_deferred)
+            {
+                connection_alive = handle_serial_port_command(&s_sessions[i]);
+            }
+            else if (ret == 0 && s_sessions[i].type != CONN_TYPE_REALCOM_CMD)
             {
                 // select超时，检查此连接是否不活动超时
                 if ((now - s_sessions[i].last_activity_time) > INACTIVITY_TIMEOUT_SECONDS)
@@ -186,17 +214,64 @@ void *ConfigTaskManager(void *arg)
     return NULL;
 }
 
-/**
- * @brief 处理单个串口配置指令
- * @details 直接将接收到的数据缓冲区传递给 app_uart.c 中的 handle_command。
- */
-static void handle_serial_port_command(ClientSession *session)
+static void set_uart_command_deferred(ClientSession *session, int deferred)
 {
+    if (session->uart_command_deferred == deferred)
+    {
+        return;
+    }
 
-    ChannelState *p_channel = &g_system_config.channels[session->channel_index];
-    handle_command(p_channel, session->fd, (char *)session->rx_buffer, session->rx_bytes, session->channel_index);
-    // 处理完后清空缓冲区，准备接收下一条指令
-    session->rx_bytes = 0;
+    semTake(g_config_mutex, WAIT_FOREVER);
+    ChannelState *channel = &g_system_config.channels[session->channel_index];
+    if (deferred)
+    {
+        channel->uart_reconfigure_waiters++;
+    }
+    else if (channel->uart_reconfigure_waiters > 0)
+    {
+        channel->uart_reconfigure_waiters--;
+    }
+
+    session->uart_command_deferred = deferred;
+    semGive(g_config_mutex);
+}
+
+static int handle_serial_port_command(ClientSession *session)
+{
+    ChannelState *channel = &g_system_config.channels[session->channel_index];
+    int consumed = 0;
+    int deferred = 0;
+
+    /* ASPP 帧由命令字、负载长度和负载组成，TCP 可以任意拆分。 */
+    while (session->rx_bytes - consumed >= ASPP_HEADER_LEN)
+    {
+        unsigned char *frame = &session->rx_buffer[consumed];
+        int frame_len = ASPP_HEADER_LEN + frame[1];
+        if (session->rx_bytes - consumed < frame_len)
+        {
+            break;
+        }
+
+        int result = handle_command(channel, session->fd, (char *)frame, frame_len, session->channel_index);
+        if (result == ERROR)
+        {
+            return 0;
+        }
+        if (result == ASPP_COMMAND_DEFERRED)
+        {
+            deferred = 1;
+            break;
+        }
+        consumed += frame_len;
+    }
+
+    if (consumed > 0)
+    {
+        session->rx_bytes -= consumed;
+        memmove(session->rx_buffer, session->rx_buffer + consumed, session->rx_bytes);
+    }
+    set_uart_command_deferred(session, deferred);
+    return 1;
 }
 
 /**
@@ -282,7 +357,7 @@ static int handle_config_client(int index)
         session->rx_bytes += n;
         if (session->type == CONN_TYPE_REALCOM_CMD)
         {
-            handle_serial_port_command(session);
+            return handle_serial_port_command(session);
         }
 
         else if (session->type == CONN_TYPE_SETTING)
@@ -299,16 +374,12 @@ static int handle_config_client(int index)
         //        shutdown(session->fd, SHUT_RDWR);
         //        close(session->fd);
         //        session->fd = -1;
-        //        g_active_tcp_connections[session->channel_index]--;
-        //
-        //        LOG_DEBUG("g_active_tcp_connections[%d] = %d\n", session->channel_index, g_active_tcp_connections[session->channel_index]);
 
         return 0;
     }
     else
     {
-        return (errno == EWOULDBLOCK || errno == EAGAIN) ? 1 : 0;
-        return 0;
+        return errno == EWOULDBLOCK || errno == EAGAIN || errno == EINTR;
     }
 
     return 1;
@@ -372,6 +443,7 @@ static void cleanup_config_connection(int index)
     if (session->type == CONN_TYPE_REALCOM_CMD && session->channel_index >= 0)
     {
         int channel_index = session->channel_index;
+        set_uart_command_deferred(session, 0);
 
         semTake(g_config_mutex, WAIT_FOREVER);
         ChannelState *channel = &g_system_config.channels[channel_index];
@@ -392,14 +464,6 @@ static void cleanup_config_connection(int index)
             }
         }
 
-        // 更新全局TCP连接计数
-        if (client_found && g_active_tcp_connections[channel_index] > 0)
-        {
-            g_active_tcp_connections[channel_index]--;
-            LOG_DEBUG("ConfigTask: Ch %d g_active_tcp_connections decreased to %d\n",
-                      channel_index, g_active_tcp_connections[channel_index]);
-        }
-
         // 如果这是最后一个命令客户端，更新网络状态
         if (client_found && channel->cmd_net_info.num_clients == 0)
         {
@@ -409,22 +473,7 @@ static void cleanup_config_connection(int index)
             // *** 检查数据通道是否也已没有客户端 ***
             if (channel->data_net_info.num_clients == 0)
             {
-                /* 数据发送尚未排空时，由实时任务在 TxIdle 后关闭 UART。 */
-                if (channel->uart_state == UART_STATE_OPENED && (!ring_buffer_is_empty(&channel->buffer_net) ||
-                     !axi16550_Tx_IDLE(channel_index) || channel->rs485_tx_active))
-                {
-                    LOG_INFO("ConfigTask: All network clients for Ch %d disconnected. "
-                             "UART close deferred until TX drain.\n",
-                             channel_index);
-                }
-                else
-                {
-                    channel->uart_state = UART_STATE_CLOSED;
-                    ring_buffer_reset(&channel->buffer_net);
-                    LOG_INFO("ConfigTask: All network clients for Ch %d disconnected. "
-                             "UART physical state -> CLOSED.\n",
-                             channel_index);
-                }
+                channel->uart_close_pending = (channel->uart_state == UART_STATE_OPENED);
             }
         }
         semGive(g_config_mutex);

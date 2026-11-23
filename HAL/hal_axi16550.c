@@ -206,18 +206,19 @@ int axi16550Send(unsigned int channel, uint8_t *buffer, uint32_t len)
     return 0;
 }
 
-int axi16550Recv(unsigned int channel, uint8_t *buffer, uint32_t *len,
-                 uint32_t *frame_err, uint32_t *parity_err,
-                 uint32_t *overrun_err, uint32_t *break_cnt)
+int axi16550RecvBounded(unsigned int channel, uint8_t *buffer, uint32_t capacity,
+                        uint32_t *len, uint32_t *frame_err, uint32_t *parity_err,
+                        uint32_t *overrun_err, uint32_t *break_cnt)
 {
     *len = 0;
+    if (buffer == NULL)
+        return -1;
     uint32_t local_frame = 0;
     uint32_t local_parity = 0;
     uint32_t local_over = 0;
     uint32_t local_break = 0;
 
-    /* Read data until there is no more data available */
-    while (1)
+    while (*len < capacity)
     {
         uint8_t lsr = userAxiCfgRead(channel, AXI_16550_LSR);
         if (!(lsr & LSR_DR))
@@ -247,9 +248,15 @@ int axi16550Recv(unsigned int channel, uint8_t *buffer, uint32_t *len,
     if (break_cnt)
         *break_cnt = local_break;
 
-    if (buffer == NULL || *len == 0)
-        return -1;
-    return 0;
+    return *len == 0 ? -1 : 0;
+}
+
+int axi16550Recv(unsigned int channel, uint8_t *buffer, uint32_t *len,
+                 uint32_t *frame_err, uint32_t *parity_err,
+                 uint32_t *overrun_err, uint32_t *break_cnt)
+{
+    return axi16550RecvBounded(channel, buffer, UINT32_MAX, len, frame_err,
+                              parity_err, overrun_err, break_cnt);
 }
 
 void axi16550BaudInit(unsigned int channel, unsigned int baud)

@@ -14,12 +14,19 @@
  
 //#include "app_com.h" // 引入 OP_MODE_*, DELIMITER_PROCESS_NONE 等枚举类型
 
+
+#define RS422
+
+#ifdef RS422
+#define DEFAULT_COM_INTERFACE_TYPE          INTERFACE_TYPE_RS422    
+#else
+#define DEFAULT_COM_INTERFACE_TYPE          INTERFACE_TYPE_RS232    
+#endif
+
 //--------------------------------------------------------------------------------------
 #define NET_NUM 2
 //--- Real COM Mode 默认配置参数 ---
 #define DEFAULT_COM_BAUDRATE                115200
-#define DEFAULT_COM_INTERFACE_TYPE          INTERFACE_TYPE_RS232    
-
 
 /* 端口锁定状态 */
 typedef enum 
@@ -37,6 +44,10 @@ typedef enum
 } PortConnectStatus;
 
 //--------------------------------------------------------------------------------------
+
+/** @brief Real COM/Tcp Server 模式最大存活时间为 99，当为 0 表示关闭*/
+#define TCP_ALIVE_CHECK_MAX_MIN             99
+
 
 /** @brief 默认的操作模式 (Real COM)。 */
 #define DEFAULT_COM_OP_MODE              OP_MODE_REAL_COM

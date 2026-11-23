@@ -20,6 +20,7 @@
 #include <sys/reboot.h>
 #include <unistd.h>
 #include "app_led.h"
+#include "key.h"
 
 #define LAN1 0
 #define LAN2 1
@@ -303,6 +304,8 @@ static void copy_channel_config_from_flash(const ChannelConfig *src, ChannelStat
 	// 保留运行时状态，如缓冲区和网络连接信息不从Flash恢复
 	// 只恢复配置相关的状态
 	dst->uart_state = UART_STATE_CLOSED;
+	dst->uart_close_pending = 0;
+	dst->uart_reconfigure_waiters = 0;
 	dst->is_locked = src->is_locked;
 	dst->is_connected = PORT_CONNECT_NONE;
 	dst->mirror_enable = src->mirror_enable;
@@ -808,8 +811,18 @@ static void sysReboot(void)
 
 void dev_reboot(void)
 {
-	LOG_INFO("System rebooting...\n");
-	sysReboot();
+    LOG_INFO("System rebooting...\n");
+
+    if (screen_show_reboot_wait() != 0)
+    {
+        LOG_WARN("Reboot wait page timed out; continuing reboot.\n");
+    }
+
+    sysReboot();
+
+    /* 正常重启不会执行到这里；若重启失败，恢复屏幕操作 */
+    screen_cancel_reboot_wait();
+    LOG_ERROR("System reboot failed or returned unexpectedly.\n");
 }
 
 void serial_no_to_bytes(const DevSerialNo *sn, unsigned char out[8])

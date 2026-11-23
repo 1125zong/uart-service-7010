@@ -87,6 +87,8 @@ void init_channel_states(void)
     for (i = 0; i < NUM_PORTS; i++)
     {
         g_system_config.channels[i].uart_state = UART_STATE_CLOSED;
+        g_system_config.channels[i].uart_close_pending = 0;
+        g_system_config.channels[i].uart_reconfigure_waiters = 0;
         g_system_config.channels[i].is_connected = PORT_CONNECT_NONE;
         g_system_config.channels[i].data_net_info.num_clients = 0;
         g_system_config.channels[i].cmd_net_info.num_clients = 0;

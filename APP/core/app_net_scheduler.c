@@ -27,7 +27,6 @@ void run_net_send(void);
 static void cleanup_data_connection(int channel_index, int client_index_in_array);
 
 static int is_locked_port_client_allowed(int channel_index, int client_fd);
-extern int g_active_tcp_connections[NUM_PORTS];
 
 ///////////////////////////////////////////
 extern struct timespec start, end, diff; // 声明时间变量
@@ -117,10 +116,6 @@ void check_for_new_connections(void)
                 shutdown(msg.client_fd, SHUT_RDWR);
                 close(msg.client_fd);
 
-                if (g_active_tcp_connections[i] > 0)
-                {
-                    g_active_tcp_connections[i]--;
-                }
                 continue;
             }
 
@@ -129,10 +124,37 @@ void check_for_new_connections(void)
             {
             case CONN_TYPE_TCPSERVER:
             case CONN_TYPE_REALCOM_DATA:
+                if (semTake(g_config_mutex, WAIT_FOREVER) != OK)
+                {
+                    close(msg.client_fd);
+                    continue;
+                }
+
+                int connection_limit = channel->max_connections;
+                int client_count = channel->data_net_info.num_clients;
+
+                /* 同时检查配置是否合法、是否达到上限、数组是否已满 */
+                if (connection_limit < 1 ||
+                    connection_limit > MAX_CLIENTS_PER_CHANNEL ||
+                    client_count < 0 ||
+                    client_count >= connection_limit ||
+                    client_count >= MAX_CLIENTS_PER_CHANNEL)
+                {
+                    semGive(g_config_mutex);
+
+                    LOG_WARN("Ch %d DATA connection rejected: count=%d, limit=%d\n",
+                             i, client_count, connection_limit);
+
+                    close(msg.client_fd);
+                    continue;
+                }
+
+                /* 检查和登记必须在同一把锁内完成 */
+                channel->data_net_info.client_fds[client_count] = msg.client_fd;
+                channel->data_net_info.num_clients = client_count + 1;
                 channel->data_net_info.state = NET_STATE_CONNECTED;
-                channel->data_net_info.client_fds[channel->data_net_info.num_clients] = msg.client_fd;
-                channel->data_net_info.num_clients++;
                 channel->is_connected = PORT_CONNECTD;
+                channel->uart_close_pending = 0;
 
                 /* TCP Server: 客户端连接时自动初始化串口(若未初始化) */
                 if (msg.type == CONN_TYPE_TCPSERVER && channel->uart_state != UART_STATE_OPENED)
@@ -152,6 +174,7 @@ void check_for_new_connections(void)
                     LOG_INFO("NetScheduler: Ch %d UART auto-init (baud=%d)\n",
                              i, channel->baudrate);
                 }
+                semGive(g_config_mutex);
                 break;
 
             case CONN_TYPE_TCPCLIENT:
@@ -260,8 +283,16 @@ void run_net_recv(void)
             if (fd >= 0 && FD_ISSET(fd, &readfds))
             {
 
-                // (由于 select() 保证了可读性，此处的 recv() 不会阻塞)
-                int n = recv(fd, (char *)temp_buffer_net_rx, sizeof(temp_buffer_net_rx), 0);
+                if (semTake(g_config_mutex, WAIT_FOREVER) != OK)
+                    continue;
+                if (channel->uart_reconfigure_waiters > 0)
+                {
+                    /* 先排空按旧参数进入 UART 的数据。新数据暂留在 TCP 接收队列中。 */
+                    semGive(g_config_mutex);
+                    continue;
+                }
+                int n = recv(fd, (char *)temp_buffer_net_rx, sizeof(temp_buffer_net_rx), MSG_DONTWAIT);
+                int receive_error = errno;
                 if (n > 0)
                 {
                     // 记录环回测试起始时间
@@ -283,31 +314,13 @@ void run_net_recv(void)
                     //  打印接收到的网络数据
                     // LOG_DEBUG("netRecvData: %s\n", temp_buffer_net_rx);
 
-                    if (semTake(g_config_mutex, WAIT_FOREVER) == OK)
-                    {
-                        ring_buffer_queue_arr(&channel->buffer_net, (char *)temp_buffer_net_rx, n);
-                        semGive(g_config_mutex);
-                    }
-                    else
-                    {
-                        LOG_ERROR("Failed to lock TX queue for channel %d\n", i);
-                    }
+                    ring_buffer_queue_arr(&channel->buffer_net, (char *)temp_buffer_net_rx, n);
                 }
-                else if (n == 0)
+                semGive(g_config_mutex);
+                if (n == 0 || (n < 0 && receive_error != EWOULDBLOCK &&
+                               receive_error != EAGAIN && receive_error != EINTR))
                 {
-                    // 客户端主动关闭 (TCP FIN)
                     cleanup_data_connection(i, j);
-                }
-                else
-                {
-                    // n < 0
-                    // 理论上，因为我们用了 select()，不应再收到 EWOULDBLOCK。
-                    // 但为健壮性，我们仍然检查：忽略 EWOULDBLOCK，其他视为错误。
-                    if (errno != EWOULDBLOCK && errno != EAGAIN)
-                    {
-                        // 发生真实错误 (如 RST)
-                        cleanup_data_connection(i, j);
-                    }
                 }
             }
         }
@@ -460,15 +473,6 @@ static void cleanup_data_connection(int channel_index, int client_index_in_array
     channel->data_net_info.client_fds[last_index] = -1;
     channel->data_net_info.num_clients--;
 
-    // 更新全局TCP连接计数
-    extern int g_active_tcp_connections[NUM_PORTS];
-    if (g_active_tcp_connections[channel_index] > 0)
-    {
-        g_active_tcp_connections[channel_index]--;
-        LOG_DEBUG("NetScheduler: Ch %d g_active_tcp_connections decreased to %d\n",
-                  channel_index, g_active_tcp_connections[channel_index]);
-    }
-
     if (channel->data_net_info.num_clients == 0)
     {
         // 最后一个客户端断开，状态从 CONNECTED 变回 LISTENING
@@ -485,21 +489,9 @@ static void cleanup_data_connection(int channel_index, int client_index_in_array
          * TCP FIN 可能紧跟在最后一批数据之后到达。此时不能立即关闭 UART
          * 或清空 buffer_net，否则尚未写入 UART 的数据会丢失。
          */
-        if (channel->uart_state == UART_STATE_OPENED &&
-            (!ring_buffer_is_empty(&channel->buffer_net) ||
-             !axi16550_Tx_IDLE(channel_index) ||
-             channel->rs485_tx_active))
-        {
-            LOG_INFO("NetScheduler: Ch %d client disconnected; "
-                     "waiting for UART TX drain, pending=%zu.\n",
-                     channel_index,
-                     ring_buffer_num_items(&channel->buffer_net));
-        }
-        else
-        {
-            channel->uart_state = UART_STATE_CLOSED;
+        channel->uart_close_pending = (channel->uart_state == UART_STATE_OPENED);
+        if (!channel->uart_close_pending)
             ring_buffer_reset(&channel->buffer_net);
-        }
 
         channel->is_connected = PORT_CONNECT_NONE;
         LOG_INFO("NetScheduler: Ch %d has no clients left. State -> LISTENING.\n", channel_index);

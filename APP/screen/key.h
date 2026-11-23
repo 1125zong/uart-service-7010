@@ -27,4 +27,10 @@ void *KeyProcessTask(void *arg);
 void stop_key_process_task(void);
 int read_reset_key(void);
 
+/* 管理线程请求显示重启等待页；0=绘图命令已发送，-1=等待超时 */
+int screen_show_reboot_wait(void);
+
+/* 重启失败时取消等待页 */
+void screen_cancel_reboot_wait(void);
+
 #endif // !__KEY_H

@@ -1,0 +1,14 @@
+
+
+bootargs=console=ttyPS0,115200 noinitrd earlyprintk root=/dev/mmcblk0p2 rootwait rw
+
+bootcmd=run guard_log; run guard_check; run boot_select
+
+guard_log=echo "[UBOOT] slot=${boot_slot} ok=${boot_ok} attempts=${boot_attempts}"
+
+guard_check=if test ${boot_attempts} -gt 0; then run guard_dec; else run guard_switch; fi
+
+boot_select=echo "[UBOOT] boot_slot=${boot_slot}"; if test ${boot_slot} = b; then run boot_b; else run boot_a; fi
+
+boot_slot=a
+boot_attempts=3

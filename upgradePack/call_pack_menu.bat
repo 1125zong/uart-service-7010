@@ -18,6 +18,10 @@ if errorlevel 1 (
 echo Found Python: py
 echo.
 
+set "ROOTFS_FILE=rootfs.ext2"
+if exist rootfs.jffs2 set "ROOTFS_FILE=rootfs.jffs2"
+if exist rootfs.ext2 set "ROOTFS_FILE=rootfs.ext2"
+
 :menu
 cls
 echo ========================================
@@ -30,6 +34,7 @@ if exist top_7015.bit echo   - top_7015.bit (Bitstream)
 if exist os.bin echo   - os.bin (OS)
 if exist app echo   - app (App)
 if exist image.ub echo   - image.ub (Kernel)
+if exist rootfs.ext2 echo   - rootfs.ext2 (RootFS)
 if exist rootfs.jffs2 echo   - rootfs.jffs2 (RootFS)
 echo.
 echo Please select packing mode:
@@ -38,8 +43,9 @@ echo 1. Pack all components (Bitstream + OS + App + Kernel + RootFS)
 echo 2. Pack Bitstream only
 echo 3. Pack App only
 echo 4. Pack Kernel only (image.ub)
-echo 5. Pack RootFS only (rootfs.jffs2)
+echo 5. Pack RootFS only (%ROOTFS_FILE%)
 echo 6. Pack Bitstream + Kernel + RootFS (Generate upgrade.pkg)
+echo 7. Custom packing (any file names / paths)
 echo 0. Exit
 echo.
 set /p choice="Enter option: "
@@ -61,7 +67,7 @@ goto invalid
 :option1
 echo.
 echo Packing all components...
-py firmware_packer.py --bitstream top_7015.bit --os os.bin --app app.bin --kernel image.ub --rootfs rootfs.jffs2 -o update_full.pkg
+py firmware_packer.py --bitstream top_7015.bit --os os.bin --app app.bin --kernel image.ub --rootfs "%ROOTFS_FILE%" -o update_full.pkg
 if errorlevel 1 (
     echo.
     echo ERROR: Packing failed
@@ -120,8 +126,8 @@ goto menu
 
 :option5
 echo.
-echo Packing RootFS only (rootfs.jffs2)...
-py firmware_packer.py --rootfs rootfs.jffs2 -o rootfs_only.pkg
+echo Packing RootFS only (%ROOTFS_FILE%)...
+py firmware_packer.py --rootfs "%ROOTFS_FILE%" -o rootfs_only.pkg
 if errorlevel 1 (
     echo.
     echo ERROR: Packing failed
@@ -136,7 +142,53 @@ goto menu
 :option6
 echo.
 echo Packing Bitstream + Kernel + RootFS (Generating upgrade.pkg)...
-py firmware_packer.py --bitstream top_7015.bit --kernel image.ub --rootfs rootfs.jffs2 -o upgrade.pkg
+py firmware_packer.py --bitstream top_7015.bit --kernel image.ub --rootfs "%ROOTFS_FILE%" -o upgrade.pkg
+if errorlevel 1 (
+    echo.
+    echo ERROR: Packing failed
+    pause
+    goto menu
+)
+echo.
+echo SUCCESS: Packing completed
+pause
+goto menu
+
+:option7
+echo.
+echo Custom packing
+echo Enter file path for each component, press Enter to skip.
+echo.
+set "BIT_INPUT="
+set "OS_INPUT="
+set "APP_INPUT="
+set "KERNEL_INPUT="
+set "ROOTFS_INPUT="
+set "OUTPUT_INPUT="
+set /p "BIT_INPUT=Bitstream file      : "
+set /p "OS_INPUT=OS file             : "
+set /p "APP_INPUT=App file            : "
+set /p "KERNEL_INPUT=Kernel file       : "
+set /p "ROOTFS_INPUT=RootFS file       : "
+set /p "OUTPUT_INPUT=Output package [custom.pkg]: "
+if "%OUTPUT_INPUT%"=="" set "OUTPUT_INPUT=custom.pkg"
+
+set "ARGS="
+if defined BIT_INPUT set "ARGS=%ARGS% --bitstream "%BIT_INPUT%""
+if defined OS_INPUT set "ARGS=%ARGS% --os "%OS_INPUT%""
+if defined APP_INPUT set "ARGS=%ARGS% --app "%APP_INPUT%""
+if defined KERNEL_INPUT set "ARGS=%ARGS% --kernel "%KERNEL_INPUT%""
+if defined ROOTFS_INPUT set "ARGS=%ARGS% --rootfs "%ROOTFS_INPUT%""
+
+if not defined ARGS (
+    echo.
+    echo ERROR: Please specify at least one component.
+    pause
+    goto menu
+)
+
+echo.
+py firmware_packer.py %ARGS% -o "%OUTPUT_INPUT%"
 if errorlevel 1 (
     echo.
     echo ERROR: Packing failed

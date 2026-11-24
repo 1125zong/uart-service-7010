@@ -24,15 +24,19 @@
 #include <string.h>
 #include <stdint.h>
 #include <stdlib.h>
+
+/* 旧 MTD env 实现已禁用；以下头文件仅在重新启用旧实现时需要。 */
+#if 0
 #include <errno.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
 #include <mtd/mtd-user.h>
-#include <arpa/inet.h>  // for htonl
+#include <arpa/inet.h>
 #include "hal_log.h"
 #include "hal_flash.h"
 #include "system_abstraction_layer.h"
+#endif
 
 
 
@@ -110,7 +114,13 @@ uint32_t calculate_crc32(uint32_t crc_in, const void *buf, size_t len)
 }
 
 
-#if 1
+#if 0
+/**
+ * @brief 旧实现：直接操作 /dev/mtd2 设置环境变量值
+ *
+ * 新方案 U-Boot env 仍保留在 QSPI，但通过标准 fw_setenv/fw_printenv
+ * 访问，避免直接写死偏移和破坏 env CRC。保留此分支仅供旧平台参考。
+ */
 /**
  * @brief 直接操作 /dev/mtd2 设置环境变量值
  * 顺序: bitstream_b_size(0), image_b_size(4), bootpart(8), fpgapart(12)
@@ -324,122 +334,87 @@ int get_uboot_env(const char *var_name, char *out_buf, size_t buf_len)
 
 #else
 
+#define FW_ENV_GET_TMP_FILE "/tmp/fw_env_get.txt"
+
 /**
- * @brief 设置 U-Boot 环境变量（带 fallback 机制）
- * @param key: 环境变量名
- * @param value: 环境变量值
+ * @brief 通过 fw_setenv 设置 U-Boot 环境变量
+ * @param key 环境变量名
+ * @param value 环境变量值
  * @return 成功返回 0，失败返回 -1
  */
-int set_uboot_env(const char *key, const char *value) 
+int set_uboot_env(const char *key, const char *value)
 {
-    char command[512];
-    int ret;
+    char command[512] = {0};
 
-    /* 步骤1: 尝试直接调用 fw_setenv */
-    snprintf(command, sizeof(command), "fw_setenv %s %s 2>&1", key, value);
-    LOG_INFO("set_uboot_env: 尝试直接调用...\n");
-
-    FILE *fp = popen(command, "r");
-    if (fp != NULL) {
-        char output[256] = {0};
-        char line[128];
-        while (fgets(line, sizeof(line), fp) != NULL) {
-            strncat(output, line, sizeof(output) - strlen(output) - 1);
-        }
-        ret = pclose(fp);
-        
-        if (WIFEXITED(ret) && WEXITSTATUS(ret) == 0) {
-            LOG_INFO("set_uboot_env: 直接调用成功 %s = %s\n", key, value);
-            return 0;
-        }
-        LOG_INFO("set_uboot_env: 直接调用失败, output: %s\n", output);
+    if (key == NULL || value == NULL || key[0] == '\0')
+    {
+        fprintf(stderr, "set_uboot_env: invalid argument\n");
+        return -1;
     }
 
-    /* 步骤2: 尝试通过 system() 调用 */
     snprintf(command, sizeof(command), "fw_setenv %s %s", key, value);
-    LOG_INFO("set_uboot_env: 尝试 system() 调用...\n");
-    
-    ret = system(command);
-    if (ret == -1) {
-        LOG_ERROR("set_uboot_env: system() 调用失败\n");
-    } else if (WIFEXITED(ret) && WEXITSTATUS(ret) == 0) {
-        LOG_INFO("set_uboot_env: system() 调用成功 %s = %s\n", key, value);
-        return 0;
-    } else {
-        LOG_INFO("set_uboot_env: system() 调用失败, errcode: %d\n", WEXITSTATUS(ret));
+    printf("set_uboot_env cmd: %s\n", command);
+
+    if (system(command) != 0)
+    {
+        fprintf(stderr, "set_uboot_env: failed to set %s=%s\n", key, value);
+        return -1;
     }
 
-    /* 步骤3: 尝试带 sudo */
-    LOG_INFO("set_uboot_env: 尝试 sudo 调用...\n");
-    snprintf(command, sizeof(command), "sudo fw_setenv %s %s 2>&1", key, value);
-    
-    fp = popen(command, "r");
-    if (fp != NULL) {
-        char output[256] = {0};
-        char line[128];
-        while (fgets(line, sizeof(line), fp) != NULL) {
-            strncat(output, line, sizeof(output) - strlen(output) - 1);
-        }
-        ret = pclose(fp);
-        
-        if (WIFEXITED(ret) && WEXITSTATUS(ret) == 0) {
-            LOG_INFO("set_uboot_env: sudo 调用成功 %s = %s\n", key, value);
-            return 0;
-        }
-        LOG_ERROR("set_uboot_env: sudo 调用失败, output: %s\n", output);
-    }
-
-    LOG_ERROR("set_uboot_env: 所有方法均失败 %s = %s\n", key, value);
-    return -1;
+    return 0;
 }
 
-
 /**
- * @brief 调用 fw_printenv 获取 U-Boot 环境变量的值
- * @param var_name: 要获取的环境变量名（如 "ipaddr"、"bootargs"）
- * @param out_buf: 存储变量值的缓冲区
- * @param buf_len: 缓冲区大小
+ * @brief 通过 fw_printenv 读取 U-Boot 环境变量
+ * @param var_name 环境变量名
+ * @param out_buf 输出缓冲区
+ * @param buf_len 输出缓冲区长度
  * @return 成功返回 0，失败返回 -1
  */
-int get_uboot_env(const char *var_name, char *out_buf, size_t buf_len) 
+int get_uboot_env(const char *var_name, char *out_buf, size_t buf_len)
 {
-    if (var_name == NULL || out_buf == NULL || buf_len == 0) {
-        fprintf(stderr, "参数无效\n");
-        return -1;
-    }
+    char cmd[512] = {0};
+    FILE *fp;
+    size_t len;
 
-    // 拼接 fw_printenv 命令（-n 仅输出变量值，避免解析多余内容）
-    char cmd[256];
-    snprintf(cmd, sizeof(cmd), "fw_printenv -n %s", var_name);
-
-    printf("get_uboot_env cmd: %s\n", cmd);
-    // 执行命令并读取输出
-    FILE *fp = popen(cmd, "r");
-    if (fp == NULL) {
-        fprintf(stderr, "执行 fw_printenv 失败: %s\n", strerror(errno));
-        return -1;
-    }
-
-    // 读取命令输出（变量值）到缓冲区
-    memset(out_buf, 0, buf_len);
-    if (fgets(out_buf, buf_len - 1, fp) == NULL) 
+    if (var_name == NULL || out_buf == NULL || buf_len == 0)
     {
-        fprintf(stderr, "读取变量 %s 失败（变量不存在或配置错误）\n", var_name);
-        pclose(fp);
+        fprintf(stderr, "get_uboot_env: invalid argument\n");
         return -1;
     }
 
-    // 去除换行符（fgets 会读取换行符）
-    size_t len = strlen(out_buf);
-    if (len > 0 && out_buf[len - 1] == '\n') {
+    memset(out_buf, 0, buf_len);
+
+    snprintf(cmd, sizeof(cmd), "fw_printenv -n %s > %s 2>/dev/null",
+             var_name, FW_ENV_GET_TMP_FILE);
+
+    if (system(cmd) != 0)
+    {
+        remove(FW_ENV_GET_TMP_FILE);
+        return -1;
+    }
+
+    fp = fopen(FW_ENV_GET_TMP_FILE, "r");
+    if (fp == NULL)
+    {
+        return -1;
+    }
+
+    if (fgets(out_buf, (int)buf_len - 1, fp) == NULL)
+    {
+        fclose(fp);
+        remove(FW_ENV_GET_TMP_FILE);
+        return -1;
+    }
+
+    fclose(fp);
+    remove(FW_ENV_GET_TMP_FILE);
+
+    len = strlen(out_buf);
+    while (len > 0 && (out_buf[len - 1] == '\n' || out_buf[len - 1] == '\r'))
+    {
         out_buf[len - 1] = '\0';
-    }
-
-    // 关闭管道并检查命令退出码
-    int ret = pclose(fp);
-    if (WEXITSTATUS(ret) != 0) {
-        fprintf(stderr, "fw_printenv 执行出错，退出码: %d\n", WEXITSTATUS(ret));
-        return -1;
+        len--;
     }
 
     printf("get U-Boot env %s = %s\n", var_name, out_buf);

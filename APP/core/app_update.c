@@ -7,16 +7,23 @@
 #include <stdio.h>
 #include <stdlib.h>      /* 用于 malloc, free */
 #include <string.h>      /* 用于 memcpy, memset */
-#include <unistd.h>      
+#include <errno.h>
+#include <fcntl.h>
+#include <unistd.h>
 #include <sys/stat.h>    /* 用于 chmod */
+#include <sys/mount.h>
 #include <pthread.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>        /* sockaddr_in, IPPROTO_TCP 等 */
-#include <sys/socket.h>
 #include <arpa/inet.h>
+
+/* 旧 MTD/flashcp 实现已禁用；以下头文件仅在重新启用旧实现时需要。 */
+#if 0
 #include <sys/ioctl.h>
+#include <sys/wait.h>
 #include <mtd/mtd-abi.h>
+#endif
 
 /* --- 1. 包含共享的定义 --- */
 #include "hal_log.h"
@@ -38,28 +45,72 @@
 #define MAX_CLIENT_QUEUE        1
 
 /*
- * 固件包最大允许大小 (例如 20MB)
- * (防止恶意客户端耗尽 RAM)
+ * 固件包最大允许大小。
+ * 新方案 rootfs 可能是 tar.gz 或完整 ext4 镜像，20MB 明显不够。
+ * 如镜像超过 256MB，可通过编译参数 -DFW_MAX_PACKAGE_SIZE=... 覆盖。
+ * 注意：app_com.h 里已有 MAX_PACKAGE_SIZE(256)，这里使用独立名字避免冲突。
  */
-#define MAX_PACKAGE_SIZE (20 * 1024 * 1024)
+#ifndef FW_MAX_PACKAGE_SIZE
+#define FW_MAX_PACKAGE_SIZE (256 * 1024 * 1024)
+#endif
+
+/* eMMC A/B 分区。按当前板卡分区表填写，可用编译参数覆盖。 */
+#ifndef IMAGE_A_DEV
+#define IMAGE_A_DEV     "/dev/mmcblk0p1"
+#endif
+#ifndef ROOTFS_A_DEV
+#define ROOTFS_A_DEV    "/dev/mmcblk0p2"
+#endif
+#ifndef IMAGE_B_DEV
+#define IMAGE_B_DEV     "/dev/mmcblk0p3"
+#endif
+#ifndef ROOTFS_B_DEV
+#define ROOTFS_B_DEV    "/dev/mmcblk0p4"
+#endif
+
+#ifndef IMAGE_MOUNT_POINT
+#define IMAGE_MOUNT_POINT   "/mnt/fw_image"
+#endif
+#ifndef ROOTFS_MOUNT_POINT
+#define ROOTFS_MOUNT_POINT  "/mnt/fw_rootfs"
+#endif
+
+#define KERNEL_FILE_NAME        "image.ub"
+#ifndef BITSTREAM_FILE_NAME
+#define BITSTREAM_FILE_NAME     "top_7015.bit"
+#endif
+#ifndef APP_INSTALL_PATH_IN_ROOTFS
+#define APP_INSTALL_PATH_IN_ROOTFS  "/usr/local/bin/uart-service"
+#endif
+
+typedef struct
+{
+    const char *name;
+    const char *image_dev;
+    const char *rootfs_dev;
+} FirmwareSlot;
 
 /* 任务 ID */
 static int serverTaskId = 0;
 static pthread_t server_thread_id = 0;  // POSIX 线程 ID
-
-const char *mtd_dev_image_b = "/dev/mtd5";  //image_b
-const char *mtd_dev_rootfs_b = "/dev/mtd6";  //image_b
-#define TEMP_FILE "/tmp/image.ub"  // 临时文件（写入后自动删除）
 
 /* --- 3. 函数原型 --- */
 void *update_server_main(void *arg);
 STATUS handle_client(int client_sock);
 STATUS process_firmware_package(int client_sock, char *buffer, long size);
 
-
-static int flashcp_write(const char *src_file, const char *mtd_device) ;
-static int write_mem_to_temp(const void *buf, size_t buf_len, const char *temp_path);
-static int erase_mtd_partition(const char *mtd_device);
+static int write_mem_to_file(const void *buf, size_t buf_len, const char *path, mode_t mode);
+static int write_mem_to_block_device(const void *buf, size_t buf_len, const char *dev);
+static int write_mem_to_mounted_file(const void *buf, size_t buf_len,
+                                     const char *dev, const char *mnt,
+                                     const char *fstype, const char *path_in_fs,
+                                     mode_t mode);
+static int write_rootfs_to_target(const void *buf, uint32_t len,
+                                  const char *dev, const char *mnt);
+static int detect_ab_slots(FirmwareSlot *current, FirmwareSlot *target,
+                           char *current_name, size_t current_name_len,
+                           char *target_name, size_t target_name_len);
+static STATUS finalize_upgrade(const char *current_slot, const char *target_slot);
 
 /* 【修正】: 函数原型现在需要 header 指针和四个数据指针 */
 STATUS write_firmware_to_flash(
@@ -287,7 +338,7 @@ STATUS handle_client(int client_sock)
     file_size = ntohl(net_size); /* 转换为 主机 字节序 */
 
     /* 2. 安全检查: 检查文件大小是否过大 */
-    if (file_size == 0 || file_size > MAX_PACKAGE_SIZE)
+    if (file_size == 0 || file_size > FW_MAX_PACKAGE_SIZE)
     {
         LOG_INFO("handle_client: [X] Invalid or oversized file size (Size: %u)\n", file_size);
         send_status(client_sock, STATUS_ERROR); /* (V4) 发送错误 */
@@ -608,7 +659,10 @@ STATUS process_firmware_package(int client_sock, char *buffer, long size)
 
 /*
  * =================================================================
- * FLASH 写入逻辑 (V-Final 方案 - 安全升级版)
+ * eMMC A/B 交换升级写入逻辑
+ *
+ * 当前从 A 启动 -> 写 B；当前从 B 启动 -> 写 A。
+ * 写入完成后才切换 boot_slot，并保留 boot_slot_prev 供回退。
  * =================================================================
  */
 STATUS write_firmware_to_flash(
@@ -618,23 +672,133 @@ STATUS write_firmware_to_flash(
     const char *rootfs_data,
     const char *app_data)
 {
+    FirmwareSlot current;
+    FirmwareSlot target;
+    char current_name[16] = {0};
+    char target_name[16] = {0};
+
+    if (detect_ab_slots(&current, &target,
+                        current_name, sizeof(current_name),
+                        target_name, sizeof(target_name)) != OK)
+    {
+        printf("write_flash: [X] Failed to detect current boot slot\n");
+        return ERROR;
+    }
+
+    printf("write_flash: current slot=%s, target slot=%s\n", current_name, target_name);
+    printf("write_flash: target image=%s, target rootfs=%s\n",
+           target.image_dev, target.rootfs_dev);
+
+    if (header->update_flags & UPDATE_FLAG_OS)
+    {
+        printf("write_flash: OS segment is reserved, skip writing\n");
+    }
+
+    if (header->update_flags & UPDATE_FLAG_BITSTREAM)
+    {
+        printf("write_flash: writing %u bytes bitstream to %s:%s\n",
+               header->bit_length, target.image_dev, BITSTREAM_FILE_NAME);
+        if (write_mem_to_mounted_file(bit_data, header->bit_length,
+                                      target.image_dev, IMAGE_MOUNT_POINT,
+                                      "vfat", BITSTREAM_FILE_NAME, 0644) != 0)
+        {
+            printf("write_flash: [X] failed to write bitstream\n");
+            return ERROR;
+        }
+    }
+
+    if (header->update_flags & UPDATE_FLAG_KERNEL)
+    {
+        printf("write_flash: writing %u bytes kernel to %s:%s\n",
+               header->kernel_length, target.image_dev, KERNEL_FILE_NAME);
+        if (write_mem_to_mounted_file(kernel_data, header->kernel_length,
+                                      target.image_dev, IMAGE_MOUNT_POINT,
+                                      "vfat", KERNEL_FILE_NAME, 0644) != 0)
+        {
+            printf("write_flash: [X] failed to write kernel\n");
+            return ERROR;
+        }
+    }
+
+    if (header->update_flags & UPDATE_FLAG_ROOTFS)
+    {
+        printf("write_flash: writing %u bytes rootfs to %s\n",
+               header->rootfs_length, target.rootfs_dev);
+        if (write_rootfs_to_target(rootfs_data, header->rootfs_length,
+                                   target.rootfs_dev, ROOTFS_MOUNT_POINT) != 0)
+        {
+            printf("write_flash: [X] failed to write rootfs\n");
+            return ERROR;
+        }
+    }
+
+    if (header->update_flags & UPDATE_FLAG_APP)
+    {
+        printf("write_flash: writing %u bytes app to %s:%s\n",
+               header->app_length, target.rootfs_dev, APP_INSTALL_PATH_IN_ROOTFS);
+        if (write_mem_to_mounted_file(app_data, header->app_length,
+                                      target.rootfs_dev, ROOTFS_MOUNT_POINT,
+                                      "ext4", APP_INSTALL_PATH_IN_ROOTFS, 0755) != 0)
+        {
+            printf("write_flash: [X] failed to write app\n");
+            return ERROR;
+        }
+    }
+
+    if (finalize_upgrade(current_name, target_name) != OK)
+    {
+        printf("write_flash: [X] failed to update U-Boot environment\n");
+        return ERROR;
+    }
+
+    printf("write_flash: [OK] slot %s updated, next boot slot=%s\n",
+           target_name, target_name);
+    return OK;
+}
+
+/*
+ * =================================================================
+ * 旧实现：MTD/QSPI flashcp 升级逻辑（保留但屏蔽）
+ *
+ * 该实现依赖 /dev/mtd5、/dev/mtd6 和 flashcp，
+ * 仅适用于旧板卡。新方案默认使用上面的 eMMC A/B 交换升级逻辑。
+ * 如需恢复旧方案，需启用本段并将上面的新实现屏蔽。
+ * =================================================================
+ */
+#if 0
+
+const char *mtd_dev_image_b = "/dev/mtd5";
+const char *mtd_dev_rootfs_b = "/dev/mtd6";
+#define TEMP_FILE "/tmp/image.ub"
+
+static int write_mem_to_temp(const void *buf, size_t buf_len, const char *temp_path);
+static int flashcp_write(const char *src_file, const char *mtd_device);
+static int erase_mtd_partition(const char *mtd_device);
+
+STATUS write_firmware_to_flash(
+    const fw_package_header_t *header,
+    const char *bit_data,
+    const char *kernel_data,
+    const char *rootfs_data,
+    const char *app_data)
+{
     char size_str[12]; /* 用于整数到字符串的转换 */
 
-    /* 
+    /*
      * 【安全升级机制 - 容错保护】
-     * 
+     *
      * 重要原则：升级过程中任何时刻断电，系统都必须能正常启动！
-     * 
+     *
      * 断电场景分析：
      *   - 假设当前系统 bootpart=1，从 mtd7 启动
      *   - 如果正在升级 mtd7 时断电，mtd7 数据损坏
      *   - 如果 bootpart 仍然是 1，系统从损坏的 mtd7 启动 → 启动失败！
-     * 
+     *
      * 解决方案：
      *   1. 在写入任何固件之前，先设置 bootpart=0
      *   2. 整个升级过程中，bootpart=0 保证可以从安全分区 mtd6 启动
      *   3. 升级成功后才切换回 bootpart=1
-     * 
+     *
      * 完整流程：
      *   STEP0: 设置 bootpart=0（确保安全分区）
      *   STEP1: 写入固件到 mtd7
@@ -659,13 +823,12 @@ STATUS write_firmware_to_flash(
     {
         LOG_INFO("write_flash: writing %u bytes Bitstream..\n", header->bit_length);
 
-        // 1. 将内存数据写入临时文件
         if (write_mem_to_temp(bit_data, header->bit_length, TEMP_FILE) != 0)
         {
             LOG_ERROR("write_flash: [SAFE-UPGRADE] Write bit temp file failed! bootpart=0 (safe partition).\n");
             return -1;
         }
-   
+
         LOG_INFO("write_flash: writing Bitstream to BitpartitionB...\n");
         if (flashcp_write(TEMP_FILE, mtd_dev_image_b) != 0)
         {
@@ -684,27 +847,26 @@ STATUS write_firmware_to_flash(
     {
         LOG_INFO("write_flash: Writing %u bytes KERNEL ...\n", header->kernel_length);
 
-        // 将内存数据写入临时文件
         if (write_mem_to_temp(kernel_data, header->kernel_length, TEMP_FILE) != 0)
         {
             LOG_ERROR("write_flash: [SAFE-UPGRADE] Write kernel temp file failed! bootpart=0 (safe partition).\n");
             return -1;
-        }    
+        }
         LOG_INFO("write_flash: writing imageb to partitionB...\n");
         if (flashcp_write(TEMP_FILE, mtd_dev_image_b) != 0)
         {
             LOG_INFO("write_flash: [SAFE-UPGRADE] Writing imageb to partitionB failed! bootpart=0 (safe partition).\n");
             return -1;
         }
-        LOG_INFO("write_flash: writing imageb to partitionB OK!\n");    
+        LOG_INFO("write_flash: writing imageb to partitionB OK!\n");
     }
     else
     {
         LOG_INFO("write_flash: kernel NOT updated, skip writing\n");
     }
 
-    //更新rootfs，如果需要
-    if(header->update_flags & UPDATE_FLAG_ROOTFS)
+    // 更新rootfs，如果需要
+    if (header->update_flags & UPDATE_FLAG_ROOTFS)
     {
         LOG_INFO("write_falsh: writing %u bytes ROOTFS...\n", header->rootfs_length);
 
@@ -712,7 +874,7 @@ STATUS write_firmware_to_flash(
         {
             LOG_ERROR("write_flash: [SAFE-UPGRADE] Write rootfs temp file failed! bootpart=0 (safe partition).\n");
             return -1;
-        }    
+        }
         LOG_INFO("write_flash: writing rootfs to partitionB...\n");
         if (flashcp_write(TEMP_FILE, mtd_dev_rootfs_b) != 0)
         {
@@ -721,7 +883,7 @@ STATUS write_firmware_to_flash(
         }
         LOG_INFO("write_flash: writing rootfs to partitionB OK!\n");
     }
-    else 
+    else
     {
         LOG_INFO("write_flash: rootfs NOT updated, skip writing\n");
     }
@@ -737,7 +899,6 @@ STATUS write_firmware_to_flash(
             return -1;
         }
 
-        /* 设置可执行权限 */
         if (chmod("/tmp/app/app", 0755) != 0)
         {
             LOG_ERROR("write_flash: [WARNING] chmod app failed!\n");
@@ -748,95 +909,59 @@ STATUS write_firmware_to_flash(
     {
         LOG_INFO("write_flash: APP NOT updated, skip writing\n");
     }
-  
+
     /* --- 步骤 4: 最后设置 bootpart=1 (切换到新分区) --- */
-    /* 
-     * 【安全升级机制 - 容错保护】
-     * 
-     * 注意：由于 Nor Flash 物理特性（只能 1→0，不能 0→1），
-     * 设置 bootpart=1 之前必须先擦除 mtd2，这会导致所有环境变量丢失！
-     * 
-     * 因此步骤 4 的目的是：
-     * 1. 擦除 mtd2（为了后续能设置 bootpart=1）
-     * 2. 重新设置所有环境变量
-     * 3. 最后切换到新分区
-     * 
-     * 【重要】即使升级完全失败（返回 -1），系统仍然可以从 mtd6 启动，因为：
-     * - STEP0 已经设置了 bootpart=0（虽然被擦除了，但本次升级过程中断电不会回到那个状态）
-     * - STEP4.2 会重新设置 bootpart=0（保证安全）
-     * - 只有 STEP4.5 成功才会切换到 bootpart=1
-     */
     LOG_INFO("write_flash: [STEP4] [SAFE-UPGRADE] Finalizing firmware upgrade...\n");
-    
-    /* 4.1 擦除 mtd2 分区 */
+
     if (erase_mtd_partition("/dev/mtd2") != 0)
     {
         LOG_ERROR("write_flash: [STEP4] [ERROR] Failed to erase mtd2! Upgrade failed, bootpart stays at safe value.\n");
         return -1;
     }
     LOG_INFO("write_flash: [STEP4a] mtd2 erased.\n");
-    
-    
-    /* 4.3 设置新分区环境变量 (目标分区 mtd7) */
-    LOG_INFO("write_flash: [STEP4d] Setting environment variables for new partition (mtd7)...\n");
-    /* 设置 image_b_size (新分区) */
+
     if (header->update_flags & UPDATE_FLAG_KERNEL)
     {
         sprintf(size_str, "%d", header->kernel_length);
         set_uboot_env("image_b_size", size_str);
     }
-    
-    /* 设置 bitstream_b_size 和 fpgapart=1 (新分区) */
+
     if (header->update_flags & UPDATE_FLAG_BITSTREAM)
     {
         sprintf(size_str, "%u", header->bit_length);
         set_uboot_env("bitstream_b_size", size_str);
         set_uboot_env("fpgapart", "1");
     }
-    
-    /* 4.4 【最后步骤】设置 bootpart=1 切换到新分区 */
-    /* 只有所有环境变量都设置成功后才会执行这一步 */
-    LOG_INFO("write_flash: [STEP4e] All variables set successfully. Switching to new partition (bootpart=1)...\n");
+
     if (set_uboot_env("bootpart", "1") != 0)
     {
         LOG_ERROR("write_flash: [STEP4e] [ERROR] Failed to set bootpart=1! System will boot from safe partition (mtd6).\n");
-        /* 注意：此时 bootpart=0，系统从安全分区启动，这是预期行为 */
         return -1;
-    }
-    else
-    {
-        LOG_INFO("write_flash: [STEP4] [SUCCESS] bootpart=1 set successfully!\n");
-        LOG_INFO("write_flash: [STEP4] System will boot from new partition (mtd7) on next reboot.\n");
     }
 
     LOG_INFO("write_flash: [COMPLETE] All firmware upgrade completed successfully!\n");
     return OK;
 }
 
-
 /**
- * @brief 将内存数据写入临时文件
- * @param buf: 内存数据缓冲区
- * @param buf_len: 数据长度
- * @param temp_path: 临时文件路径
- * @return 成功返回 0，失败返回 -1
+ * @brief 将内存数据写入临时文件（旧实现）
  */
 static int write_mem_to_temp(const void *buf, size_t buf_len, const char *temp_path)
 {
     int fd = open(temp_path, O_RDWR | O_CREAT | O_TRUNC, 0644);
-    if (fd < 0) {
+    if (fd < 0)
+    {
         fprintf(stderr, "Failed to create temp file: %s, err=%s\n", temp_path, strerror(errno));
         return -1;
     }
 
-    // 写入内存数据到临时文件
     size_t ret = write(fd, buf, buf_len);
     if (ret != buf_len)
     {
         fprintf(stderr, "Failed to write temp file: Expected %lu B, Actual %zd B\n",
                 (unsigned long)buf_len, ret);
         close(fd);
-        unlink(temp_path);  // 清理临时文件
+        unlink(temp_path);
         return -1;
     }
 
@@ -846,31 +971,29 @@ static int write_mem_to_temp(const void *buf, size_t buf_len, const char *temp_p
 }
 
 /**
- * @brief 封装 flashcp 命令，向 MTD 设备写入文件
- * @param src_file 待写入的源文件路径（如 "./test.bin"）
- * @param mtd_device MTD 设备路径（如 "/dev/mtd3"）
- * @return 成功返回 0，失败返回 -1
+ * @brief 封装 flashcp 命令，向 MTD 设备写入文件（旧实现）
  */
 static int flashcp_write(const char *src_file, const char *mtd_device)
 {
     char cmd[256];
     int ret;
-    if (src_file == NULL || mtd_device == NULL) {
+
+    if (src_file == NULL || mtd_device == NULL)
+    {
         fprintf(stderr, "Parameters cannot be NULL\n");
         return -1;
     }
 
     snprintf(cmd, sizeof(cmd), "flashcp -v %s %s", src_file, mtd_device);
 
-    // 执行命令并检查返回值
     printf("cmd: %s\n", cmd);
     ret = system(cmd);
-    if (ret == -1) 
+    if (ret == -1)
     {
         fprintf(stderr, "Failed to execute flashcp: %s\n", strerror(errno));
         return -1;
-    } 
-    else if (WEXITSTATUS(ret) != 0) 
+    }
+    else if (WEXITSTATUS(ret) != 0)
     {
         fprintf(stderr, "flashcp execution error, exit code: %d\n", WEXITSTATUS(ret));
         return -1;
@@ -881,48 +1004,42 @@ static int flashcp_write(const char *src_file, const char *mtd_device)
 }
 
 /**
- * @brief 擦除 MTD 分区
- * @param mtd_device MTD 设备路径（如 "/dev/mtd2"）
- * @return 成功返回 0，失败返回 -1
- * 
- * 注意：NAND Flash 必须先擦除才能写入新数据
- * 擦除后所有字节会变成 0xFF
+ * @brief 擦除 MTD 分区（旧实现）
  */
 static int erase_mtd_partition(const char *mtd_device)
 {
-    if (mtd_device == NULL) {
+    if (mtd_device == NULL)
+    {
         fprintf(stderr, "erase_mtd_partition: mtd_device is NULL\n");
         return -1;
     }
 
     int fd = open(mtd_device, O_RDWR);
-    if (fd < 0) {
-        fprintf(stderr, "erase_mtd_partition: Failed to open %s: %s\n", 
+    if (fd < 0)
+    {
+        fprintf(stderr, "erase_mtd_partition: Failed to open %s: %s\n",
                 mtd_device, strerror(errno));
         return -1;
     }
 
-    /* 获取 MTD 分区信息 */
     struct mtd_info_user mtd_info;
-    if (ioctl(fd, MEMGETINFO, &mtd_info) < 0) {
-        fprintf(stderr, "erase_mtd_partition: MEMGETINFO ioctl failed: %s\n", 
-                strerror(errno));
+    if (ioctl(fd, MEMGETINFO, &mtd_info) < 0)
+    {
+        fprintf(stderr, "erase_mtd_partition: MEMGETINFO ioctl failed: %s\n", strerror(errno));
         close(fd);
         return -1;
     }
 
-    /* 设置擦除参数 */
     struct erase_info_user erase;
     erase.start = 0;
     erase.length = mtd_info.size;
 
-    printf("erase_mtd_partition: Erasing %s (%u bytes)...\n", 
+    printf("erase_mtd_partition: Erasing %s (%u bytes)...\n",
            mtd_device, mtd_info.size);
 
-    /* 执行擦除 */
-    if (ioctl(fd, MEMERASE, &erase) < 0) {
-        fprintf(stderr, "erase_mtd_partition: MEMERASE ioctl failed: %s\n", 
-                strerror(errno));
+    if (ioctl(fd, MEMERASE, &erase) < 0)
+    {
+        fprintf(stderr, "erase_mtd_partition: MEMERASE ioctl failed: %s\n", strerror(errno));
         close(fd);
         return -1;
     }
@@ -930,4 +1047,455 @@ static int erase_mtd_partition(const char *mtd_device)
     close(fd);
     printf("erase_mtd_partition: Erase completed successfully\n");
     return 0;
+}
+
+#endif /* 旧 MTD/flashcp 实现 */
+
+
+static int ensure_mount_point(const char *mnt)
+{
+    struct stat st = {0};
+
+    if (mnt == NULL || mnt[0] == '\0')
+    {
+        return -1;
+    }
+
+    if (stat(mnt, &st) == 0)
+    {
+        return S_ISDIR(st.st_mode) ? 0 : -1;
+    }
+
+    if (mkdir(mnt, 0755) != 0 && errno != EEXIST)
+    {
+        fprintf(stderr, "Failed to create mount point %s: %s\n", mnt, strerror(errno));
+        return -1;
+    }
+
+    return 0;
+}
+
+static int ensure_parent_directory(const char *path)
+{
+    char tmp[512] = {0};
+    char cmd[1024] = {0};
+    char *slash;
+
+    if (path == NULL || strlen(path) >= sizeof(tmp))
+    {
+        return -1;
+    }
+
+    strcpy(tmp, path);
+    slash = strrchr(tmp, '/');
+    if (slash == NULL || slash == tmp)
+    {
+        return 0;
+    }
+    *slash = '\0';
+
+    snprintf(cmd, sizeof(cmd), "mkdir -p %s", tmp);
+    if (system(cmd) != 0)
+    {
+        fprintf(stderr, "Failed to create directory %s\n", tmp);
+        return -1;
+    }
+
+    return 0;
+}
+
+static int write_mem_to_file(const void *buf, size_t buf_len, const char *path, mode_t mode)
+{
+    int fd;
+    size_t offset = 0;
+    mode_t final_mode = mode ? mode : 0644;
+
+    if (buf == NULL || path == NULL)
+    {
+        return -1;
+    }
+
+    if (ensure_parent_directory(path) != 0)
+    {
+        return -1;
+    }
+
+    fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, final_mode);
+    if (fd < 0)
+    {
+        fprintf(stderr, "Failed to open %s for writing: %s\n", path, strerror(errno));
+        return -1;
+    }
+
+    while (offset < buf_len)
+    {
+        ssize_t written = write(fd, (const char *)buf + offset, buf_len - offset);
+        if (written < 0)
+        {
+            if (errno == EINTR)
+            {
+                continue;
+            }
+            fprintf(stderr, "Failed to write %s: %s\n", path, strerror(errno));
+            close(fd);
+            return -1;
+        }
+        if (written == 0)
+        {
+            break;
+        }
+        offset += (size_t)written;
+    }
+
+    if (fsync(fd) != 0)
+    {
+        fprintf(stderr, "Warning: fsync %s failed: %s\n", path, strerror(errno));
+    }
+    close(fd);
+
+    if (offset != buf_len)
+    {
+        fprintf(stderr, "Short write to %s: %zu/%zu bytes\n", path, offset, buf_len);
+        return -1;
+    }
+
+    if (chmod(path, final_mode) != 0)
+    {
+        fprintf(stderr, "Warning: chmod %s failed: %s\n", path, strerror(errno));
+    }
+
+    return 0;
+}
+
+static int write_mem_to_block_device(const void *buf, size_t buf_len, const char *dev)
+{
+    int fd;
+    size_t offset = 0;
+
+    if (buf == NULL || dev == NULL)
+    {
+        return -1;
+    }
+
+    /* 目标分区不应被挂载；若已经挂载则先卸载。未挂载时 EINVAL 可忽略。 */
+    if (umount(dev) != 0 && errno != EINVAL)
+    {
+        fprintf(stderr, "Warning: umount %s failed: %s\n", dev, strerror(errno));
+    }
+
+    fd = open(dev, O_WRONLY | O_SYNC);
+    if (fd < 0)
+    {
+        fprintf(stderr, "Failed to open %s: %s\n", dev, strerror(errno));
+        return -1;
+    }
+
+    if (lseek(fd, 0, SEEK_SET) < 0)
+    {
+        fprintf(stderr, "Failed to seek %s: %s\n", dev, strerror(errno));
+        close(fd);
+        return -1;
+    }
+
+    while (offset < buf_len)
+    {
+        ssize_t written = write(fd, (const char *)buf + offset, buf_len - offset);
+        if (written < 0)
+        {
+            if (errno == EINTR)
+            {
+                continue;
+            }
+            fprintf(stderr, "Failed to write %s: %s\n", dev, strerror(errno));
+            close(fd);
+            return -1;
+        }
+        if (written == 0)
+        {
+            break;
+        }
+        offset += (size_t)written;
+    }
+
+    if (fsync(fd) != 0)
+    {
+        fprintf(stderr, "Warning: fsync %s failed: %s\n", dev, strerror(errno));
+    }
+    close(fd);
+    sync();
+
+    if (offset != buf_len)
+    {
+        fprintf(stderr, "Short write to %s: %zu/%zu bytes\n", dev, offset, buf_len);
+        return -1;
+    }
+
+    return 0;
+}
+
+static int write_mem_to_mounted_file(const void *buf, size_t buf_len,
+                                     const char *dev, const char *mnt,
+                                     const char *fstype, const char *path_in_fs,
+                                     mode_t mode)
+{
+    char full_path[512] = {0};
+    const char *rel;
+    int ret = -1;
+    int n;
+
+    if (buf == NULL || dev == NULL || mnt == NULL || fstype == NULL || path_in_fs == NULL)
+    {
+        return -1;
+    }
+
+    if (ensure_mount_point(mnt) != 0)
+    {
+        return -1;
+    }
+
+    if (umount(mnt) != 0 && errno != EINVAL)
+    {
+        fprintf(stderr, "Warning: umount %s failed: %s\n", mnt, strerror(errno));
+    }
+
+    if (mount(dev, mnt, fstype, 0, NULL) != 0)
+    {
+        fprintf(stderr, "Failed to mount %s (%s) at %s: %s\n",
+                dev, fstype, mnt, strerror(errno));
+        return -1;
+    }
+
+    rel = path_in_fs;
+    while (*rel == '/')
+    {
+        rel++;
+    }
+
+    n = snprintf(full_path, sizeof(full_path), "%s/%s", mnt, rel);
+    if (n < 0 || n >= (int)sizeof(full_path))
+    {
+        fprintf(stderr, "Path too long: %s/%s\n", mnt, rel);
+        umount(mnt);
+        return -1;
+    }
+
+    ret = write_mem_to_file(buf, buf_len, full_path, mode);
+    if (ret == 0)
+    {
+        sync();
+    }
+
+    if (umount(mnt) != 0)
+    {
+        fprintf(stderr, "Failed to umount %s: %s\n", mnt, strerror(errno));
+        ret = -1;
+    }
+
+    return ret;
+}
+
+static int is_ext4_image(const unsigned char *buf, size_t len)
+{
+    /*
+     * ext2/ext3/ext4 superblock magic is 0xEF53.
+     * On little-endian systems it is stored at offset 0x438 as 0x53, 0xEF.
+     */
+    return len > (0x438 + 2) && buf[0x438] == 0x53 && buf[0x439] == 0xEF;
+}
+
+static int is_gzip_data(const unsigned char *buf, size_t len)
+{
+    return len >= 2 && buf[0] == 0x1F && buf[1] == 0x8B;
+}
+
+static int is_tar_data(const unsigned char *buf, size_t len)
+{
+    return len > 262 && memcmp(buf + 257, "ustar", 5) == 0;
+}
+
+static int extract_tar_to_mounted_fs(const void *buf, size_t len,
+                                     const char *dev, const char *mnt,
+                                     int gzip)
+{
+    char cmd[256] = {0};
+    FILE *fp;
+    size_t offset = 0;
+    int ret = -1;
+    int close_ret;
+
+    if (buf == NULL || dev == NULL || mnt == NULL)
+    {
+        return -1;
+    }
+
+    if (ensure_mount_point(mnt) != 0)
+    {
+        return -1;
+    }
+
+    if (umount(mnt) != 0 && errno != EINVAL)
+    {
+        fprintf(stderr, "Warning: umount %s failed: %s\n", mnt, strerror(errno));
+    }
+
+    if (mount(dev, mnt, "ext4", 0, NULL) != 0)
+    {
+        fprintf(stderr, "Failed to mount %s at %s: %s\n", dev, mnt, strerror(errno));
+        return -1;
+    }
+
+    snprintf(cmd, sizeof(cmd), "tar -%s -C %s", gzip ? "xz" : "x", mnt);
+    fp = popen(cmd, "w");
+    if (fp == NULL)
+    {
+        fprintf(stderr, "Failed to run %s: %s\n", cmd, strerror(errno));
+        umount(mnt);
+        return -1;
+    }
+
+    while (offset < len)
+    {
+        size_t written = fwrite((const char *)buf + offset, 1, len - offset, fp);
+        if (written == 0)
+        {
+            break;
+        }
+        offset += written;
+    }
+
+    close_ret = pclose(fp);
+    if (offset != len || close_ret != 0)
+    {
+        fprintf(stderr, "tar extract failed: written=%zu/%zu, ret=%d\n",
+                offset, len, close_ret);
+    }
+    else
+    {
+        ret = 0;
+        sync();
+    }
+
+    if (umount(mnt) != 0)
+    {
+        fprintf(stderr, "Failed to umount %s: %s\n", mnt, strerror(errno));
+        ret = -1;
+    }
+
+    return ret;
+}
+
+static int write_rootfs_to_target(const void *buf, uint32_t len,
+                                  const char *dev, const char *mnt)
+{
+    const unsigned char *data = (const unsigned char *)buf;
+
+    if (data == NULL || dev == NULL || mnt == NULL)
+    {
+        return -1;
+    }
+
+    if (is_ext4_image(data, len))
+    {
+        printf("rootfs: detected raw ext2/ext3/ext4 image, writing to %s\n", dev);
+        return write_mem_to_block_device(data, len, dev);
+    }
+
+    if (is_gzip_data(data, len) || is_tar_data(data, len))
+    {
+        int gzip = is_gzip_data(data, len);
+        printf("rootfs: detected %s archive, extracting to %s\n",
+               gzip ? "tar.gz" : "tar", mnt);
+        return extract_tar_to_mounted_fs(data, len, dev, mnt, gzip);
+    }
+
+    fprintf(stderr, "Unsupported rootfs format. Use a raw ext2/ext3/ext4 image or tar/tar.gz archive.\n");
+    return -1;
+}
+
+static int detect_ab_slots(FirmwareSlot *current, FirmwareSlot *target,
+                           char *current_name, size_t current_name_len,
+                           char *target_name, size_t target_name_len)
+{
+    char env_slot[32] = {0};
+    int current_is_b = 0;
+
+    if (current == NULL || target == NULL ||
+        current_name == NULL || target_name == NULL ||
+        current_name_len == 0 || target_name_len == 0)
+    {
+        return -1;
+    }
+
+    if (get_uboot_env("boot_slot", env_slot, sizeof(env_slot)) != 0)
+    {
+        fprintf(stderr, "Failed to read boot_slot. Refuse upgrade to avoid writing the running slot.\n");
+        return -1;
+    }
+
+    if (env_slot[0] == 'b' || env_slot[0] == 'B' || strcmp(env_slot, "1") == 0)
+    {
+        current_is_b = 1;
+    }
+    else if (env_slot[0] == 'a' || env_slot[0] == 'A' || strcmp(env_slot, "0") == 0)
+    {
+        current_is_b = 0;
+    }
+    else
+    {
+        fprintf(stderr, "Unknown boot_slot=%s. Refuse upgrade.\n", env_slot);
+        return -1;
+    }
+
+    if (current_is_b)
+    {
+        current->name = "b";
+        current->image_dev = IMAGE_B_DEV;
+        current->rootfs_dev = ROOTFS_B_DEV;
+        target->name = "a";
+        target->image_dev = IMAGE_A_DEV;
+        target->rootfs_dev = ROOTFS_A_DEV;
+    }
+    else
+    {
+        current->name = "a";
+        current->image_dev = IMAGE_A_DEV;
+        current->rootfs_dev = ROOTFS_A_DEV;
+        target->name = "b";
+        target->image_dev = IMAGE_B_DEV;
+        target->rootfs_dev = ROOTFS_B_DEV;
+    }
+
+    snprintf(current_name, current_name_len, "%s", current->name);
+    snprintf(target_name, target_name_len, "%s", target->name);
+    return 0;
+}
+
+static STATUS finalize_upgrade(const char *current_slot, const char *target_slot)
+{
+    if (current_slot == NULL || target_slot == NULL)
+    {
+        return ERROR;
+    }
+
+    if (set_uboot_env("boot_slot_prev", current_slot) != 0)
+    {
+        fprintf(stderr, "Failed to set boot_slot_prev\n");
+        return ERROR;
+    }
+
+    if (set_uboot_env("boot_attempts", "3") != 0)
+    {
+        fprintf(stderr, "Failed to set boot_attempts\n");
+        return ERROR;
+    }
+
+    /* 最后切换 boot_slot，保证试运行标志先于新槽生效 */
+    if (set_uboot_env("boot_slot", target_slot) != 0)
+    {
+        fprintf(stderr, "Failed to set boot_slot\n");
+        return ERROR;
+    }
+
+    sync();
+    return OK;
 }

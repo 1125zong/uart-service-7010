@@ -254,11 +254,12 @@ def main():
   # 只打包 Kernel (Linux 内核)
   %(prog)s --kernel image.ub -o kernel_only.pkg
 
-  # 只打包 RootFS (根文件系统)
-  %(prog)s --rootfs rootfs.jffs2 -o rootfs_only.pkg
+  # 只打包 RootFS (根文件系统，ext4 镜像或 tar/tar.gz 包)
+  %(prog)s --rootfs rootfs.ext4 -o rootfs_only.pkg
+  %(prog)s --rootfs rootfs.tar.gz -o rootfs_tar_only.pkg
 
   # 打包 Kernel 和 RootFS (Linux 完整固件)
-  %(prog)s --kernel image.ub --rootfs rootfs.jffs2 -o update.img
+  %(prog)s --kernel image.ub --rootfs rootfs.ext4 -o update.img
 
   # 打包 Bitstream 和 OS
   %(prog)s --bitstream bitstream.bin --os os.bin -o bit_os.pkg
@@ -274,7 +275,7 @@ def main():
     parser.add_argument('--kernel', '-k', type=str,
                         help='Kernel 文件路径 (Linux 内核镜像 image.ub)')
     parser.add_argument('--rootfs', '-r', type=str,
-                        help='RootFS 文件路径 (根文件系统 rootfs.jffs2)')
+                        help='RootFS 文件路径 (ext4 镜像或 tar/tar.gz 包)')
     parser.add_argument('--output', '-o', type=str, required=True,
                         help='输出固件包文件路径')
 

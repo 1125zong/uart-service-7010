@@ -9,12 +9,14 @@
  * =====================================================================================
  */
 #include <sys/mount.h>
+#include <unistd.h>
 #include "app_com.h"
 #include "app_udp_search.h"
 #include "app_net_cfg.h"
 #include "app_net_con.h"
 #include "app_report.h"
 #include "app_net_scheduler.h"
+#include "app_update_env.h"
 
 #include "hal_axi16550.h"
 #include "key.h"
@@ -74,6 +76,25 @@ void app_start(void)
     int ret;
     log_init(LOG_LEVEL_DEBUG);
 
+
+#if 0
+    {
+        char boot_slot[16] = {0};
+
+        if (get_uboot_env("boot_slot", boot_slot, sizeof(boot_slot)) == 0)
+        {
+            printf("[BOOT] boot_slot=%s, rootfs=%s\n",
+                   boot_slot,
+                   (boot_slot[0] == 'b' || boot_slot[0] == 'B') ?
+                   "/dev/mmcblk0p4(rootfs_b)" : "/dev/mmcblk0p2(rootfs_a)");
+        }
+        else
+        {
+            printf("[BOOT] boot_slot is not set, current slot unknown\n");
+        }
+    }
+#endif
+
     // FPGA_Info_Read();
     if (init_global_resources() != OK)
     {
@@ -132,6 +153,13 @@ void app_start(void)
     {
         LOG_ERROR("Failed to start LED task, error=%d\n", ret);
     }
+
+    /* 业务启动成功，刷新启动计数，避免 U-Boot 连续失败切槽 */
+    if (set_uboot_env("boot_attempts", "3") != 0)
+    {
+        printf("Warning: failed to refresh boot_attempts\n");
+    }
+    sync();
 
     // 程序退出前回收所有线程资源
     LOG_INFO("Application is exiting, cleaning up threads...\n");

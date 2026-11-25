@@ -480,13 +480,7 @@ void load_app_data(void)
 
 void sysReboot(void)
 {
-    // 同步数据到磁盘，确保数据不丢失
-    sync();
-    // 等待一段时间让sync完成
-    sleep(1);
-    // 执行系统重启
-    // printf("reboot...\n");
-    reboot(RB_AUTOBOOT);
+    dev_reboot_from_key();
 }
 
 /**********************************TIMER*******************************************************/

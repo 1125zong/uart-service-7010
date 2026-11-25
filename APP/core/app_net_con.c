@@ -331,6 +331,13 @@ static void handle_new_connections(fd_set *p_readfds)
             LOG_DEBUG("Accepted new connection (fd=%d) from %s:%d for channel %d.\n", client_fd, inet_ntoa(client_addr.sin_addr), ntohs(client_addr.sin_port), channel_index);
             if (client_fd >= 0)
             {
+                if (dev_is_rebooting())
+                {
+                    shutdown(client_fd, SHUT_RDWR);
+                    close(client_fd);
+                    continue;
+                }
+
                 int flag = 1;
                 setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, (char *)&flag, sizeof(int));
 

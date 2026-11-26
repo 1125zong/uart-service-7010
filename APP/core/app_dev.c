@@ -679,6 +679,34 @@ void dev_config_load_defaults(void)
 	}
 }
 
+int dev_tcp_server_port_available_locked(int channel_index, unsigned int port)
+{
+	if (channel_index < 0 || channel_index >= NUM_PORTS)
+	{
+		LOG_ERROR("TCP Server port check failed: channel_index=%d, allowed=0..%d\n", channel_index, NUM_PORTS - 1);
+		return 0;
+	}
+
+	if (port < TCP_SERVER_PORT_MIN || port > TCP_SERVER_PORT_MAX)
+	{
+		LOG_WARN("Port %d: invalid TCP listen port=%u, allowed=%u..%u\n", channel_index + 1, port, (unsigned int)TCP_SERVER_PORT_MIN, (unsigned int)TCP_SERVER_PORT_MAX);
+		return 0;
+	}
+
+	for (int i = 0; i < NUM_PORTS; ++i)
+	{
+		const ChannelState *channel = &g_system_config.channels[i];
+
+		if (i != channel_index && port == channel->local_tcp_port)
+		{
+			LOG_WARN("Port %d: TCP listen port=%u conflicts with Port %d, configured_mode=0x%02X\n", channel_index + 1, port, i + 1, (unsigned int)channel->op_mode);
+			return 0;
+		}
+	}
+
+	return 1;
+}
+
 int dev_config_init(void)
 {
 	int ret;
@@ -811,18 +839,18 @@ static void sysReboot(void)
 
 void dev_reboot(void)
 {
-    LOG_INFO("System rebooting...\n");
+	LOG_INFO("System rebooting...\n");
 
-    if (screen_show_reboot_wait() != 0)
-    {
-        LOG_WARN("Reboot wait page timed out; continuing reboot.\n");
-    }
+	if (screen_show_reboot_wait() != 0)
+	{
+		LOG_WARN("Reboot wait page timed out; continuing reboot.\n");
+	}
 
-    sysReboot();
+	sysReboot();
 
-    /* 正常重启不会执行到这里；若重启失败，恢复屏幕操作 */
-    screen_cancel_reboot_wait();
-    LOG_ERROR("System reboot failed or returned unexpectedly.\n");
+	/* 正常重启不会执行到这里；若重启失败，恢复屏幕操作 */
+	screen_cancel_reboot_wait();
+	LOG_ERROR("System reboot failed or returned unexpectedly.\n");
 }
 
 void serial_no_to_bytes(const DevSerialNo *sn, unsigned char out[8])

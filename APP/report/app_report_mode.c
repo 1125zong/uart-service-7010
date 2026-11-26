@@ -22,9 +22,11 @@ void handle_read_operating_mode(int client_fd, unsigned char *data, int len)
     }
 
     const uint8_t sub_id = data[3];
-    const int all_ports = sub_id == 0x02;
+    const int extended = sub_id == 0x03 || sub_id == 0x04;  // 如果 sub_id 等于 0x03 或者 0x04，那么 extended = 1，否则为 0
+    const int all_ports = sub_id == 0x02 || sub_id == 0x04;
+    const int valid_sub_id = sub_id >= 0x01 && sub_id <= 0x04;
 
-    if ((sub_id != 0x01 && sub_id != 0x02) || len != 7 || (all_ports && data[4] != 0xFF) || (!all_ports && (data[4] < 1 || data[4] > NUM_PORTS)))
+    if (!valid_sub_id || len != 7 || (all_ports && data[4] != 0xFF) || (!all_ports && (data[4] < 1 || data[4] > NUM_PORTS)))
     {
         send_report_response(client_fd, 0x06, sub_id, FAILED);
         return;
@@ -36,7 +38,7 @@ void handle_read_operating_mode(int client_fd, unsigned char *data, int len)
         return;
     }
 
-    uint8_t response[4 + 1 + NUM_PORTS * 4 + 2] = {0xA5, 0xA5, 0x06, sub_id};
+    uint8_t response[4 + 1 + NUM_PORTS * 6 + 2] = {0xA5, 0xA5, 0x06, sub_id};
     int offset = 4;
     const int first_port = all_ports ? 1 : data[4];
     const int count = all_ports ? NUM_PORTS : 1;
@@ -53,6 +55,11 @@ void handle_read_operating_mode(int client_fd, unsigned char *data, int len)
         response[offset++] = ch->op_mode;
         response[offset++] = ch->max_connections;
         response[offset++] = ch->tcp_alive_check_time_min;
+        if (extended)
+        {
+            response[offset++] = (uint8_t)(ch->local_tcp_port >> 8);
+            response[offset++] = (uint8_t)(ch->local_tcp_port & 0xFF);
+        }
     }
 
     semGive(g_config_mutex);

@@ -624,10 +624,8 @@ static int pack_operating_mode_params(const ChannelState *channel, unsigned char
         buffer[offset++] = channel->packing_settings.delimiter_process;
         *(unsigned short *)&buffer[offset] = htons(channel->packing_settings.force_transmit_time_ms);
         offset += 2;
-        *(unsigned short *)&buffer[offset] = htons(channel->local_tcp_port);
-        offset += 2;
-        *(unsigned short *)&buffer[offset] = htons(channel->command_port);
-        offset += 2;
+        buffer[offset++] = (unsigned char)(channel->local_tcp_port >> 8);
+        buffer[offset++] = (unsigned char)(channel->local_tcp_port & 0xFF);
         break;
 
     case OP_MODE_TCP_CLIENT:
@@ -836,7 +834,7 @@ static int operating_mode_param_size(unsigned char op_mode)
     case OP_MODE_REAL_COM:
         return 11;
     case OP_MODE_TCP_SERVER:
-        return 17;
+        return 15;
     case OP_MODE_TCP_CLIENT:
         return 44;
     case OP_MODE_UDP:
@@ -934,11 +932,17 @@ static int set_single_port_mode(unsigned char port_index, unsigned char op_mode,
         return 0;
     }
 
-    semTake(g_config_mutex, WAIT_FOREVER);
+    /* 函数前面获取锁，并检查结果。 */
+    if (semTake(g_config_mutex, WAIT_FOREVER) != OK)
+    {
+        LOG_ERROR("Port mode setting failed: config mutex unavailable\n");
+        return 0;
+    }
 
     ChannelState *channel = &g_system_config.channels[port_index - 1];
     success = validate_and_update_port_mode(channel, op_mode, op_mode_data);
 
+    /* 处理完成后释放锁。 */
     semGive(g_config_mutex);
 
     LOG_INFO("Set port %d operation mode to 0x%02X: %s",
@@ -957,7 +961,17 @@ static int set_all_ports_mode(unsigned char op_mode, const unsigned char *op_mod
 {
     int i, success = 1;
 
-    semTake(g_config_mutex, WAIT_FOREVER);
+    if (op_mode == OP_MODE_TCP_SERVER && NUM_PORTS > 1)
+    {
+        LOG_WARN("Set all TCP Server ports rejected: configure distinct listen ports individually\n");
+        return 0;
+    }
+
+    if (semTake(g_config_mutex, WAIT_FOREVER) != OK)
+    {
+        LOG_ERROR("Port mode setting failed: config mutex unavailable\n");
+        return 0;
+    }
 
     for (i = 0; i < NUM_PORTS; i++)
     {
@@ -1007,6 +1021,29 @@ static int validate_and_update_port_mode(ChannelState *channel, unsigned char op
         }
     }
 
+    if (op_mode == OP_MODE_TCP_SERVER)
+    {
+        /*
+         * 此协议的 TCP Server 参数中，
+         * 偏移 13、14 是本地监听端口，采用大端序。
+         */
+        const unsigned int tcp_port = ((unsigned int)op_mode_data[13] << 8) | op_mode_data[14];
+
+        const unsigned int alive_minutes = op_mode_data[0];
+        const int channel_index = (int)(channel - g_system_config.channels);
+
+        if (alive_minutes > TCP_ALIVE_CHECK_MAX_MIN)
+        {
+            LOG_WARN("Port %d: invalid TCP keepalive_min=%u\n", channel_index + 1, alive_minutes);
+            return 0;
+        }
+
+        if (!dev_tcp_server_port_available_locked(channel_index, tcp_port))
+        {
+            return 0;
+        }
+    }
+
     // 保存旧的操作模式，以便在设置失败时恢复
     unsigned char old_op_mode = channel->op_mode;
     channel->op_mode = op_mode;
@@ -1041,9 +1078,8 @@ static int validate_and_update_port_mode(ChannelState *channel, unsigned char op
         channel->packing_settings.delimiter_process = op_mode_data[offset++];
         channel->packing_settings.force_transmit_time_ms = ntohs(*(unsigned short *)&op_mode_data[offset]);
         offset += 2;
-        channel->local_tcp_port = ntohs(*(unsigned short *)&op_mode_data[offset]);
-        offset += 2;
-        channel->command_port = ntohs(*(unsigned short *)&op_mode_data[offset]);
+        /* TCP Server 本地监听端口，高字节在前。 */
+        channel->local_tcp_port = ((unsigned int)op_mode_data[offset] << 8) | op_mode_data[offset + 1];
         offset += 2;
         break;
 

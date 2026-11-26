@@ -549,6 +549,15 @@ void dev_config_load_defaults(void);
  */
 void dev_reboot(void);
 
+/* 查询设备是否已经进入重启流程。 */
+int dev_is_rebooting(void);
+/* 管理线程使用，会请求按键线程显示重启等待页。 */
+void dev_reboot(void);
+/* KeyProcessTask 使用，当前线程已经负责屏幕操作。 */
+void dev_reboot_from_key(void);
+
+
+
 /**
  * @brief 打印当前系统所有配置信息以供调试
  */

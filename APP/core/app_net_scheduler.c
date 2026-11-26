@@ -59,7 +59,8 @@ void NetworkSchedulerTask(void)
     // diff = diff_timespec(start, end);
 
     // 打印时间差
-    // printf("执行时间: %ld 秒 %ld 毫秒 %ld 微秒\n",diff.tv_sec,diff.tv_nsec / 1000000,    diff.tv_nsec / 1000);   // 微秒
+    // printf("执行时间: %ld 秒 %ld 毫秒 %ld 微秒\n",diff.tv_sec,diff.tv_nsec / 1000000,    diff.tv_nsec / 1000);   //
+    // 微秒
 }
 
 /**
@@ -89,7 +90,9 @@ void check_for_new_connections(void)
             // 验证消息的合法性
             if (msg.channel_index != i)
             {
-                LOG_ERROR("NetScheduler: Mismatched channel index in message! Queue_idx=%d, msg.ch_idx=%d. Closing fd=%d\n", i, msg.channel_index, msg.client_fd);
+                LOG_ERROR(
+                    "NetScheduler: Mismatched channel index in message! Queue_idx=%d, msg.ch_idx=%d. Closing fd=%d\n",
+                    i, msg.channel_index, msg.client_fd);
                 close(msg.client_fd);
                 continue; // 处理下一条消息
             }
@@ -97,7 +100,8 @@ void check_for_new_connections(void)
             ChannelState *channel = &g_system_config.channels[i];
 
             /* 端口锁定时，只允许锁定该端口的PC建立数据连接 */
-            if ((msg.type == CONN_TYPE_REALCOM_DATA || msg.type == CONN_TYPE_TCPSERVER) && !is_locked_port_client_allowed(i, msg.client_fd))
+            if ((msg.type == CONN_TYPE_REALCOM_DATA || msg.type == CONN_TYPE_TCPSERVER) &&
+                !is_locked_port_client_allowed(i, msg.client_fd))
             {
                 struct sockaddr_in peer_addr;
                 socklen_t peer_len = sizeof(peer_addr);
@@ -106,7 +110,8 @@ void check_for_new_connections(void)
 
                 if (getpeername(msg.client_fd, (struct sockaddr *)&peer_addr, &peer_len) == 0)
                 {
-                    LOG_WARN("Reject client %s: port %d is locked by another PC\n", inet_ntoa(peer_addr.sin_addr), i + 1);
+                    LOG_WARN("Reject client %s: port %d is locked by another PC\n", inet_ntoa(peer_addr.sin_addr),
+                             i + 1);
                 }
                 else
                 {
@@ -130,20 +135,24 @@ void check_for_new_connections(void)
                     continue;
                 }
 
+                if (dev_is_rebooting())
+                {
+                    semGive(g_config_mutex);
+                    shutdown(msg.client_fd, SHUT_RDWR);
+                    close(msg.client_fd);
+                    continue;
+                }
+
                 int connection_limit = channel->max_connections;
                 int client_count = channel->data_net_info.num_clients;
 
                 /* 同时检查配置是否合法、是否达到上限、数组是否已满 */
-                if (connection_limit < 1 ||
-                    connection_limit > MAX_CLIENTS_PER_CHANNEL ||
-                    client_count < 0 ||
-                    client_count >= connection_limit ||
-                    client_count >= MAX_CLIENTS_PER_CHANNEL)
+                if (connection_limit < 1 || connection_limit > MAX_CLIENTS_PER_CHANNEL || client_count < 0 ||
+                    client_count >= connection_limit || client_count >= MAX_CLIENTS_PER_CHANNEL)
                 {
                     semGive(g_config_mutex);
 
-                    LOG_WARN("Ch %d DATA connection rejected: count=%d, limit=%d\n",
-                             i, client_count, connection_limit);
+                    LOG_WARN("Ch %d DATA connection rejected: count=%d, limit=%d\n", i, client_count, connection_limit);
 
                     close(msg.client_fd);
                     continue;
@@ -171,8 +180,7 @@ void check_for_new_connections(void)
                     channel->rx_count = 0;
                     channel->uart_state = UART_STATE_OPENED;
                     semGive(g_stats_mutex);
-                    LOG_INFO("NetScheduler: Ch %d UART auto-init (baud=%d)\n",
-                             i, channel->baudrate);
+                    LOG_INFO("NetScheduler: Ch %d UART auto-init (baud=%d)\n", i, channel->baudrate);
                 }
                 semGive(g_config_mutex);
                 break;
@@ -183,14 +191,14 @@ void check_for_new_connections(void)
                 break;
 
             default:
-                LOG_ERROR("NetScheduler: Ch %d received unknown conn_type %d. Closing fd=%d\n", i, msg.type, msg.client_fd);
+                LOG_ERROR("NetScheduler: Ch %d received unknown conn_type %d. Closing fd=%d\n", i, msg.type,
+                          msg.client_fd);
                 close(msg.client_fd);
                 continue; // 跳过此无效消息
             }
 
-            LOG_DEBUG("NetScheduler: Ch %d accepted new connection fd=%d, type=%d. Total clients: %d (Data).\n",
-                      i, msg.client_fd, msg.type,
-                      channel->data_net_info.num_clients);
+            LOG_DEBUG("NetScheduler: Ch %d accepted new connection fd=%d, type=%d. Total clients: %d (Data).\n", i,
+                      msg.client_fd, msg.type, channel->data_net_info.num_clients);
         }
     }
     // (处理全局配置连接队列 g_config_conn_q 的逻辑可以放在这里，如果需要的话)
@@ -317,8 +325,8 @@ void run_net_recv(void)
                     ring_buffer_queue_arr(&channel->buffer_net, (char *)temp_buffer_net_rx, n);
                 }
                 semGive(g_config_mutex);
-                if (n == 0 || (n < 0 && receive_error != EWOULDBLOCK &&
-                               receive_error != EAGAIN && receive_error != EINTR))
+                if (n == 0 ||
+                    (n < 0 && receive_error != EWOULDBLOCK && receive_error != EAGAIN && receive_error != EINTR))
                 {
                     cleanup_data_connection(i, j);
                 }
@@ -353,8 +361,7 @@ void run_net_send(void)
 
         has_data[i] = 0;
 
-        if (channel->data_net_info.num_clients == 0 ||
-            ring_buffer_is_empty(&channel->buffer_uart))
+        if (channel->data_net_info.num_clients == 0 || ring_buffer_is_empty(&channel->buffer_uart))
         {
             continue;
         }
@@ -409,7 +416,8 @@ void run_net_send(void)
             continue;
 
         // 从环形缓冲区读取一小块数据
-        unsigned int bytes_to_send = ring_buffer_dequeue_arr(&channel->buffer_uart, (char *)temp_buffer_net_tx, TX_NET_SIZE);
+        unsigned int bytes_to_send =
+            ring_buffer_dequeue_arr(&channel->buffer_uart, (char *)temp_buffer_net_tx, TX_NET_SIZE);
 
         if (bytes_to_send > 0)
         {
@@ -422,7 +430,7 @@ void run_net_send(void)
 
                 if (fd >= 0 && FD_ISSET(fd, &writefds))
                 {
-                    int sent = send(fd, (char *)temp_buffer_net_tx, bytes_to_send, 0);
+                    int sent = send(fd, (char *)temp_buffer_net_tx, bytes_to_send, MSG_NOSIGNAL);
 
                     /*================= 临时添加 ================*/
                     if (sent > 0)

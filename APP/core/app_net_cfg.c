@@ -65,6 +65,13 @@ void *ConfigTaskManager(void *arg)
         // cmd
         while (msgQReceive(g_config_conn_q, (char *)&msg, sizeof(msg), NO_WAIT) == sizeof(NewConnectionMsg))
         {
+            if (dev_is_rebooting())
+            {
+                shutdown(msg.client_fd, SHUT_RDWR);
+                close(msg.client_fd);
+                continue;
+            }
+
             /* 先检查全局会话表容量，未接纳的连接不增加任何计数 */
             if (s_num_active_sessions >= MAX_CONFIG_CLIENTS)
             {
@@ -88,18 +95,26 @@ void *ConfigTaskManager(void *arg)
                     continue;
                 }
 
+                if (dev_is_rebooting())
+                {
+                    semGive(g_config_mutex);
+                    shutdown(msg.client_fd, SHUT_RDWR);
+                    close(msg.client_fd);
+                    continue;
+                }
+
                 ChannelState *channel = &g_system_config.channels[msg.channel_index];
 
                 int connection_limit = channel->max_connections;
                 int client_count = channel->cmd_net_info.num_clients;
 
-                if (connection_limit < 1 || connection_limit > MAX_CLIENTS_PER_CHANNEL ||
-                    client_count < 0 || client_count >= connection_limit ||
-                    client_count >= MAX_CLIENTS_PER_CHANNEL)
+                if (connection_limit < 1 || connection_limit > MAX_CLIENTS_PER_CHANNEL || client_count < 0 ||
+                    client_count >= connection_limit || client_count >= MAX_CLIENTS_PER_CHANNEL)
                 {
                     semGive(g_config_mutex);
 
-                    LOG_WARN("Ch %d CMD connection rejected: count=%d, limit=%d\n", msg.channel_index, client_count, connection_limit);
+                    LOG_WARN("Ch %d CMD connection rejected: count=%d, limit=%d\n", msg.channel_index, client_count,
+                             connection_limit);
 
                     close(msg.client_fd);
                     continue;
@@ -124,7 +139,8 @@ void *ConfigTaskManager(void *arg)
 
             s_num_active_sessions++;
 
-            LOG_INFO("Accepted config connection fd=%d, type=%d, channel=%d\n", msg.client_fd, msg.type, msg.channel_index);
+            LOG_INFO("Accepted config connection fd=%d, type=%d, channel=%d\n", msg.client_fd, msg.type,
+                     msg.channel_index);
         }
 
         if (s_num_active_sessions == 0)
@@ -506,7 +522,8 @@ static void cleanup_config_connection(int index)
  * @param gateway 要设置的默认网关 (例如 "192.168.1.1".
  * @return 0 表示成功, -1 表示失败.
  */
-int net_cfg_set_network_settings(const char *interface_name, const char *ip_address, const char *netmask, const char *gateway)
+int net_cfg_set_network_settings(const char *interface_name, const char *ip_address, const char *netmask,
+                                 const char *gateway)
 {
     char command_buffer[128];
 

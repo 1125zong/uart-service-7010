@@ -551,64 +551,89 @@ void handle_set_multiple_realcom_mode(int client_fd, unsigned char *data, int le
  */
 void handle_set_single_tcp_server_mode(int client_fd, unsigned char *data, int len)
 {
-    uint8_t main_id = data[2];
-    uint8_t sub_id = data[3];
-    LOG_INFO("  Action: Set Single TCP Server Mode, MainID=0x%02X, SubID=0x%02X\n", main_id, sub_id);
+    const uint8_t main_id = 0x05;
+    const uint8_t sub_id = 0x03;
 
-    /* 检查设备是否被锁定 */
+    if (client_fd < 0)
+    {
+        LOG_ERROR("TCP Server setting failed: invalid fd=%d\n", client_fd);
+        return;
+    }
+
+    if (data == NULL || len != 12)
+    {
+        LOG_WARN("TCP Server setting rejected: expected 12 bytes, got %d\n", len);
+
+        send_report_response(client_fd, main_id, sub_id, FAILED);
+        return;
+    }
+
+    if (data[0] != 0xA5 || data[1] != 0xA5 || data[2] != main_id || data[3] != sub_id || data[len - 2] != 0x5A || data[len - 1] != 0x5A)
+    {
+        LOG_WARN("TCP Server setting rejected: invalid frame format\n");
+
+        send_report_response(client_fd, main_id, sub_id, FAILED);
+        return;
+    }
+
     if (is_device_locked())
     {
-        LOG_ERROR("  ERROR: Device is locked, cannot update serial port settings\n");
+        LOG_WARN("TCP Server setting rejected: device locked\n");
+
         send_report_response(client_fd, main_id, sub_id, FAILED);
         return;
     }
 
-    if (len < 10 || len > 10)
+    const unsigned int port_index = data[4];
+    const unsigned int requested_mode = data[5];
+    const unsigned int max_connections = data[6];
+    const unsigned int alive_minutes = data[7];
+
+    if (port_index < 1 || port_index > NUM_PORTS || requested_mode != OP_MODE_TCP_SERVER ||
+        max_connections < 1 || max_connections > MAX_CLIENTS_PER_CHANNEL || alive_minutes > TCP_ALIVE_CHECK_MAX_MIN)
     {
-        LOG_ERROR("  ERROR: Data length insufficient\n");
+        LOG_WARN(
+            "TCP Server setting rejected: port=%u, mode=0x%02X, max_connections=%u, keepalive_min=%u\n",
+            port_index, requested_mode, max_connections, alive_minutes);
 
         send_report_response(client_fd, main_id, sub_id, FAILED);
         return;
     }
 
-    uint8_t port_index = data[4];
-    LOG_INFO("  Port Index: %d\n", port_index);
-
-    LOG_INFO("  Port Mode: %d\n", data[5]);
-
-    uint8_t port_connect_max = data[6];
-    if (port_connect_max < 1 || port_connect_max > MAX_CLIENTS_PER_CHANNEL)
+    if (semTake(g_config_mutex, WAIT_FOREVER) != OK)
     {
-        LOG_WARN("Invalid max connections: %u, allowed range: 1..%d\n", port_connect_max, MAX_CLIENTS_PER_CHANNEL);
+        LOG_ERROR("TCP Server setting failed: config mutex unavailable\n");
 
         send_report_response(client_fd, main_id, sub_id, FAILED);
         return;
     }
-    LOG_INFO("  Port Connect Max: %d\n", port_connect_max);
 
-    uint8_t Tcp_connect_timeout = data[7];
-    LOG_INFO("  Tcp_connect_timeout: %d\n", Tcp_connect_timeout);
+    const int channel_index = (int)port_index - 1;
+    ChannelState *channel = &g_system_config.channels[channel_index];
+    unsigned int tcp_port = ((unsigned int)data[8] << 8) | data[9];
 
-    if (port_index < 1 || port_index > NUM_PORTS)
+    if (!dev_tcp_server_port_available_locked(channel_index, tcp_port))
     {
-        LOG_ERROR("  ERROR: Invalid port index %d\n", port_index);
+        /* 校验函数已经打印具体原因，此处直接回复失败。 */
+        semGive(g_config_mutex);
+
         send_report_response(client_fd, main_id, sub_id, FAILED);
         return;
     }
 
-    /* 解析TCP Server模式参数（如果有额外参数的话） */
-    int ch_idx = port_index - 1;
-    semTake(g_config_mutex, WAIT_FOREVER);
-    g_system_config.channels[ch_idx].op_mode = OP_MODE_TCP_SERVER;
-    g_system_config.channels[ch_idx].max_connections = port_connect_max;
-    g_system_config.channels[ch_idx].tcp_alive_check_time_min = Tcp_connect_timeout;
+    channel->op_mode = OP_MODE_TCP_SERVER;
+    channel->max_connections = (unsigned char)max_connections;
+    channel->tcp_alive_check_time_min = (unsigned char)alive_minutes;
+    channel->local_tcp_port = (unsigned short)tcp_port;
+
     semGive(g_config_mutex);
 
-    LOG_INFO("  Port %d set to TCP Server mode\n", port_index);
+    LOG_INFO(
+        "Port %u: TCP Server configured in memory, listen_port=%u, "
+        "max_connections=%u, keepalive_min=%u, pending save/reboot\n",
+        port_index, tcp_port, max_connections, alive_minutes);
 
-    /* 发送ACK */
     send_report_response(client_fd, main_id, sub_id, SUCCESSED);
-    LOG_INFO("  Port %d set to TCP Server mode successfully\n", port_index);
 }
 
 /**
@@ -619,7 +644,6 @@ void handle_set_multiple_tcp_server_mode(int client_fd, unsigned char *data, int
     uint8_t main_id = data[2];
     uint8_t sub_id = data[3];
     // uint8_t port_mode;
-    LOG_INFO("  Action: Set Multiple TCP Server Mode, MainID=0x%02X, SubID=0x%02X\n", main_id, sub_id);
 
     if (is_device_locked())
     {
@@ -647,19 +671,22 @@ void handle_set_multiple_tcp_server_mode(int client_fd, unsigned char *data, int
     const uint8_t port_connect_max = data[6 + port_count];
     const uint8_t tcp_alive_time = data[7 + port_count];
 
-    if (data[5 + port_count] != expected_mode || port_connect_max < 1 || port_connect_max > MAX_CLIENTS_PER_CHANNEL)
+    if (data[5 + port_count] != expected_mode || port_connect_max < 1 ||
+        port_connect_max > MAX_CLIENTS_PER_CHANNEL || tcp_alive_time > TCP_ALIVE_CHECK_MAX_MIN)
     {
         send_report_response(client_fd, main_id, sub_id, FAILED);
         return;
     }
 
-    /* 整份列表检查通过后，才开始修改配置 */
-    for (int i = 0; i < port_count; i++)
+    /* 先校验全部串口号，避免数组越界。 */
+    for (int i = 0; i < port_count; ++i)
     {
-        uint8_t port_index = data[5 + i];
+        const unsigned int port_index = data[5 + i];
+
         if (port_index < 1 || port_index > NUM_PORTS)
         {
-            LOG_WARN("Invalid port index: %u\n", (unsigned int)port_index);
+            LOG_WARN("Batch TCP Server rejected: invalid port=%u\n", port_index);
+
             send_report_response(client_fd, main_id, sub_id, FAILED);
             return;
         }
@@ -667,8 +694,27 @@ void handle_set_multiple_tcp_server_mode(int client_fd, unsigned char *data, int
 
     if (semTake(g_config_mutex, WAIT_FOREVER) != OK)
     {
+        LOG_ERROR("Batch TCP Server failed: config mutex unavailable\n");
+
         send_report_response(client_fd, main_id, sub_id, FAILED);
         return;
+    }
+
+    /* 持锁检查全部监听端口，通过后再统一更新配置。 */
+    for (int i = 0; i < port_count; ++i)
+    {
+        const int channel_index = data[5 + i] - 1;
+        const unsigned int tcp_port =
+            g_system_config.channels[channel_index].local_tcp_port;
+
+        if (!dev_tcp_server_port_available_locked(
+                channel_index, tcp_port))
+        {
+            semGive(g_config_mutex);
+
+            send_report_response(client_fd, main_id, sub_id, FAILED);
+            return;
+        }
     }
 
     for (int i = 0; i < port_count; i++)
@@ -684,7 +730,8 @@ void handle_set_multiple_tcp_server_mode(int client_fd, unsigned char *data, int
 
     /* 发送ACK */
     send_report_response(client_fd, main_id, sub_id, SUCCESSED);
-    LOG_INFO("  %d serial port(s) set to TCP Server mode successfully\n", port_count);
+    LOG_INFO("Batch TCP Server configured in memory: count=%u, max_connections=%u, keepalive_min=%u, pending save/reboot\n",
+             (unsigned int)port_count, (unsigned int)port_connect_max, (unsigned int)tcp_alive_time);
 }
 
 #if 0

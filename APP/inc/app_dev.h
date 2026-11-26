@@ -4,7 +4,11 @@
 #include "app_dev_cfg.h" 
 #include "hal_ringbuffer.h"
 
-#define     MAX_LOCKED_PORT_IPS     (4)  // 最多允许4个客户端IP地址连接，每个端口最多4个IP地址
+#define     MAX_LOCKED_PORT_IPS     (4)  // 每个串口的锁定IP数组容量，当前仅使用第0项
+
+// 限制 TcpServer 模式设置的端口范围为 4001 ~ 19000
+#define TCP_SERVER_PORT_MIN 4001U
+#define TCP_SERVER_PORT_MAX 19000U
 
 /* ------------------ Application-Specific Constants ------------------ */
 #define     NUM_PORTS               	16      // 系统支持的串口/通道数量
@@ -438,9 +442,9 @@ typedef struct
     unsigned char  allow_driver_control;     // 允许驱动控制 (仅 Real COM/TCP Server)
     unsigned char  max_connections;          // 最大连接数 (仅 Real COM/TCP Server)
 
-    unsigned short local_tcp_port;           // 本地监听端口 (TCP Server/Real COM)
-    unsigned short command_port;           // 本地监听端口 (TCP Server/Real COM)
-	unsigned short data_port;
+    unsigned short local_tcp_port;           // 本地监听端口 (TCP Server)
+    unsigned short command_port;           // 命令端口 (Real COM)
+	unsigned short data_port;              // 数据端口 (Real COM)
     unsigned short connection_control;     // 连接控制 (仅 TCP Client Mode)
 
     // b) TCP Client / UDP 模式特定参数
@@ -574,6 +578,9 @@ int is_device_locked(void);
 void dev_config_dump_all(void);
 
 int save_config(void);
+
+// 设置 TcoSercer 模式下的 端口的 端口号
+int dev_tcp_server_port_available_locked(int channel_index, unsigned int port);
 
 
 /*********************重启标志位相关****************************/

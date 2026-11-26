@@ -5,6 +5,8 @@
 /* 兼容 V-Final 方案 - 共享环境 @ mtd2 */
 
 #include <stdint.h>
+#include <stddef.h>
+#include "app_com.h"
 
 /* --- MTD 驱动函数声明 (需要实现) --- */
 
@@ -47,35 +49,29 @@ uint32_t calculate_crc32(uint32_t crc_in, const void *buf, size_t len);
 
 /* --- 环境变量操作接口 --- */
 
-/**
- * @brief 查找并加载有效的环境变量分区
- * @return STATUS OK/ERROR
- * @note 从两个冗余分区中读取环境变量,选择最新有效的分区
+/*
+ * 以下 app_fw_* 接口保留给旧的冗余 MTD env 实现兼容。
+ * 当前 Linux/eMMC 方案使用标准 U-Boot 工具，实际调用 set_uboot_env/get_uboot_env。
  */
 STATUS app_fw_find_env(void);
-
-/**
- * @brief 设置环境变量 (内存中修改)
- * @param name 变量名 (支持: ver_select, os_b_size, app_b_size, bit_size)
- * @param value 变量值
- * @return STATUS OK/ERROR
- * @note 此函数只修改内存中的环境变量，需要调用 app_fw_save() 保存到 Flash
- *       - ver_select: 单字符 ('a' 或 'b')
- *       - os_b_size: 十六进制值 (如 "0x1234")
- *       - app_b_size: 十六进制值 (如 "0x5678")
- *       - bit_size: 十六进制值 (如 "0x9ABC")
- */
 STATUS app_fw_setenv(const char *name, const char *value);
-
-/**
- * @brief 保存环境变量到 Flash
- * @return STATUS OK/ERROR
- * @note 将内存中的环境变量值写入非活动分区,支持冗余保护
- *       使用标志位轮转和CRC校验确保数据完整性
- */
 STATUS app_fw_save(void);
 
-int set_uboot_env(const char *key, const char *value) ;
+/**
+ * @brief 设置 U-Boot 环境变量（底层调用 fw_setenv）
+ * @param key 环境变量名，例如 boot_slot / boot_ok
+ * @param value 环境变量值
+ * @return 成功返回 0，失败返回 -1
+ */
+int set_uboot_env(const char *key, const char *value);
+
+/**
+ * @brief 读取 U-Boot 环境变量（底层调用 fw_printenv -n）
+ * @param var_name 环境变量名
+ * @param out_buf 输出缓冲区
+ * @param buf_len 输出缓冲区长度
+ * @return 成功返回 0，失败返回 -1
+ */
 int get_uboot_env(const char *var_name, char *out_buf, size_t buf_len);
 
 /* --- 环境变量配置常量 --- */

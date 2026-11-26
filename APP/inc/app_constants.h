@@ -25,10 +25,7 @@
 #define MAX_PASSWORD_LEN 14
 #define SERIAL_NO_LEN 8
 
-#define MAX_LANS 2
-
-// 网络相关常量
-#define NET_NUM 2 // 网络接口数量
+#include "app_lan_config.h"
 
 /* ------------------ Basic Enumerations (to avoid circular dependencies) ------------------ */
 // Operation modes

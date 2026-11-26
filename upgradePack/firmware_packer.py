@@ -278,6 +278,8 @@ def main():
                         help='RootFS 文件路径 (ext4 镜像或 tar/tar.gz 包)')
     parser.add_argument('--output', '-o', type=str, required=True,
                         help='输出固件包文件路径')
+    parser.add_argument('--mode', choices=('0', '1'),
+                        help='打包模式: 0=原有打包方式, 1=跳过 Bitstream 和 OS')
 
     # 版本信息
     parser.add_argument('--pkg-version', type=str, default='v1.0.0',
@@ -294,6 +296,19 @@ def main():
                         help='RootFS 版本号 (默认: v1.0.0)')
 
     args = parser.parse_args()
+
+    # 交互模式下按 1 跳过 Bitstream 和 OS；非交互调用保持原有行为
+    mode = args.mode
+    if mode is None and sys.stdin.isatty():
+        try:
+            mode = input("打包模式 [1=跳过 Bitstream 和 OS，直接回车=原有打包方式]: ").strip()
+        except EOFError:
+            mode = '0'
+
+    if mode == '1':
+        args.bitstream = None
+        args.os = None
+        print("打包模式 1: 跳过 Bitstream 和 OS")
 
     # 检查至少指定了一个组件
     if not args.bitstream and not args.os and not args.app and not args.kernel and not args.rootfs:

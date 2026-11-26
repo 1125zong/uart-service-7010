@@ -10,6 +10,7 @@
 #include "ui_state_menu_list.h" 
 #include "ui_state_restart.h"      
 #include "app_com.h"
+#include "app_net_cfg.h"
 
 // =========================================================================
 
@@ -59,35 +60,59 @@ static const int num_settings_list_items = 7;
 #define MAX_ITEMS_PER_PAGE ((SCREEN_HEIGHT - TITLE_HEIGHT) / ITEM_HEIGHT) // 每页最多显示的项目数
 
 /**
- * @brief 将UI配置同步到全局变量g_system_config
- * @param lan_port_idx LAN端口索引
- * @param lan_port_data LAN端口数据
+ * @brief 整体校验屏幕上的启用网口，再同步到内存配置。
+ * @param config 屏幕编辑数据
  */
-static void sync_ui_config_to_global(int lan_port_idx, lan_port_t* lan_port_data)
+static int sync_ui_network_config(app_config_t *config)
 {
-    // 使用互斥锁保护全局配置的访问
-    if(semTake(g_config_mutex, WAIT_FOREVER) == OK)
+    NetPortConfig configs[NET_NUM] = {0};
+
+    if (config == NULL)
     {
-        // 更新IP配置模式
-        g_system_config.device.ip_config_mode[lan_port_idx] = 
-            (lan_port_data->ip_config == IP_CONFIG_DHCP) ? IP_MODE_DHCP : IP_MODE_STATIC;
-        
-        // 将IP地址字符串转换为网络字节序
-        g_system_config.device.ip_address[lan_port_idx] = inet_addr(lan_port_data->ip_address);
-        if(lan_port_idx == 0) {
-            g_system_config.device.ip_address1 = inet_addr(lan_port_data->ip_address);
-        } else {
-            g_system_config.device.ip_address2 = inet_addr(lan_port_data->ip_address);
-        }
-        
-        // 将子网掩码字符串转换为网络字节序
-        g_system_config.device.netmask[lan_port_idx] = inet_addr(lan_port_data->network_mask);
-        
-        // 将网关字符串转换为网络字节序
-        g_system_config.device.gateway[lan_port_idx] = inet_addr(lan_port_data->gateway);
-        
-        semGive(g_config_mutex);
+        return ERROR;
     }
+    /* 各字段先留在屏幕数据中；退出时先校验全部网口，再更新内存。 */
+    for (int i = 0; i < APP_LAN_COUNT; ++i)
+    {
+        lan_port_t *lan = &config->lan_ports[i];
+
+        if (lan->ip_config != IP_CONFIG_STATIC && lan->ip_config != IP_CONFIG_DHCP)
+        {
+            return ERROR;
+        }
+        if (lan->ip_config == IP_CONFIG_DHCP && i != 0)
+        {
+            LOG_ERROR("LAN%d DHCP is not implemented\n", i + 1);
+            return ERROR;
+        }
+        configs[i].mode = lan->ip_config == IP_CONFIG_DHCP ? IP_MODE_DHCP : IP_MODE_STATIC;
+        if (net_cfg_parse_ipv4(lan->ip_address, &configs[i].ip) != OK ||
+            net_cfg_parse_ipv4(lan->network_mask, &configs[i].mask) != OK ||
+            net_cfg_parse_ipv4(lan->gateway, &configs[i].gateway) != OK)
+        {
+            return ERROR;
+        }
+        if (configs[i].mode == IP_MODE_STATIC &&
+            net_cfg_validate_static_settings(configs[i].ip, configs[i].mask, configs[i].gateway) != OK)
+        {
+            return ERROR;
+        }
+    }
+    if (semTake(g_config_mutex, WAIT_FOREVER) != OK)
+    {
+        return ERROR;
+    }
+    if (g_system_config.device.lock_status == LOCK_STATE_LOCKED || dev_is_rebooting())
+    {
+        semGive(g_config_mutex);
+        return ERROR;
+    }
+    for (int i = 0; i < APP_LAN_COUNT; ++i)
+    {
+        dev_set_network_settings(i, &configs[i]);
+    }
+    semGive(g_config_mutex);
+    return OK;
 }
 
 // =========================================================================
@@ -436,7 +461,15 @@ static void network_handle_input(ui_manager_t* manager, key_event_t event)
     }
     
     if (exit_network_menu) {
-        if (config->current_status == STATUS_REBOOT_REQUIRED) {
+        if (config->current_status == STATUS_REBOOT_REQUIRED)
+        {
+            if (sync_ui_network_config(config) != OK)
+            {
+                LOG_ERROR("Invalid network settings, locked or rebooting\n");
+                manager->display->draw_text(0, 140, "Check IP/Mask/GW");
+                manager->display->refresh();
+                return;
+            }
             ui_set_state(manager, &g_state_restart);
         } else {
             ui_set_state(manager, manager->current_state->parent_state);
@@ -493,7 +526,7 @@ static void network_handle_input(ui_manager_t* manager, key_event_t event)
                         // printf("current_lan_port:%d\n", current_lan_port);
 
                         
-                        sync_ui_config_to_global(current_lan_port, lan);
+                        /* 字段编辑值在退出网络菜单时统一校验提交。 */
                         
                         current_mode = NET_MODE_SETTINGS_LIST;
                         draw_settings_list_page(manager);
@@ -531,7 +564,7 @@ static void network_handle_input(ui_manager_t* manager, key_event_t event)
 
                         // --- 保存配置 ---
                         // 将UI配置同步到全局变量g_system_config
-                        sync_ui_config_to_global(current_lan_port, lan);
+                        /* 字段编辑值在退出网络菜单时统一校验提交。 */
                         
                         current_mode = NET_MODE_SETTINGS_LIST;
                         draw_settings_list_page(manager);

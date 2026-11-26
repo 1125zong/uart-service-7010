@@ -1,18 +1,14 @@
-
 #ifndef APP_NET_CGF_H
-
 #define APP_NET_CGF_H
 
-/**
- * @brief 设置网络接口的IP地址、子网掩码和默认网关。
- *
- * @param interface_name 网络接口名称 (例如 "fei0").
- * @param ip_address 要设置的IP地址 (例如 "192.168.1.10").
- * @param netmask 要设置的子网掩码 (例如 "255.255.255.0").
- * @param gateway 要设置的默认网关 (例如 "192.168.1.1").
- * @return 0 表示成功, -1 表示失败.
- */
-int net_cfg_set_network_settings(const char *interface_name, const char *ip_address, const char *netmask, const char *gateway);
+#include "app_lan_config.h"
 
+/* 文本转换仅用于屏幕和启动阶段，允许十进制前导零。 */
+int net_cfg_parse_ipv4(const char *text, uint32_t *address);
+/* 参数为网络字节序；普通局域网配置支持 /1 到 /30。 */
+int net_cfg_validate_static_settings(uint32_t ip, uint32_t mask, uint32_t gateway);
+const char *net_cfg_interface_name(int index);
+int net_cfg_set_mac_address(int index, const unsigned char mac[6]);
+int net_cfg_apply_settings(int index, const NetPortConfig *config);
 
 #endif

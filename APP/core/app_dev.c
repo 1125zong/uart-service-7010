@@ -134,6 +134,75 @@ typedef struct
     unsigned char mirror_tx_port;
 } SystemConfigForFlash;
 
+static NetPortConfig s_saved_network[NET_NUM];
+static uint32_t s_saved_legacy_ip[NET_NUM];
+static int s_saved_network_valid;
+static int s_network_mirror_needs_sync;
+
+static int network_settings_equal(const NetPortConfig *left, const NetPortConfig *right)
+{
+    return left->mode == right->mode && left->ip == right->ip &&
+           left->mask == right->mask && left->gateway == right->gateway;
+}
+
+int dev_get_network_settings(int index, NetPortConfig *config)
+{
+    if (index < 0 || index >= NET_NUM || config == NULL)
+    {
+        return ERROR;
+    }
+    config->mode = g_system_config.device.ip_config_mode[index];
+    config->ip = g_system_config.device.ip_address[index];
+    config->mask = g_system_config.device.netmask[index];
+    config->gateway = g_system_config.device.gateway[index];
+    return OK;
+}
+
+int dev_set_network_settings(int index, const NetPortConfig *config)
+{
+    if (index < 0 || index >= NET_NUM || config == NULL)
+    {
+        return ERROR;
+    }
+    g_system_config.device.ip_config_mode[index] = config->mode;
+    g_system_config.device.ip_address[index] = config->ip;
+    g_system_config.device.netmask[index] = config->mask;
+    g_system_config.device.gateway[index] = config->gateway;
+    if (index == 0)
+    {
+        g_system_config.device.ip_address1 = config->ip;
+    }
+    else
+    {
+        g_system_config.device.ip_address2 = config->ip;
+    }
+    return OK;
+}
+
+static void remember_saved_network_settings(const DeviceSettings *device)
+{
+    for (int i = 0; i < NET_NUM; ++i)
+    {
+        s_saved_network[i].mode = device->ip_config_mode[i];
+        s_saved_network[i].ip = device->ip_address[i];
+        s_saved_network[i].mask = device->netmask[i];
+        s_saved_network[i].gateway = device->gateway[i];
+    }
+    s_saved_legacy_ip[0] = device->ip_address1;
+    s_saved_legacy_ip[1] = device->ip_address2;
+    s_saved_network_valid = 1;
+}
+
+int dev_network_settings_are_saved(int index, const NetPortConfig *config)
+{
+    if (index < 0 || index >= NET_NUM || config == NULL || !s_saved_network_valid)
+    {
+        return 0;
+    }
+    return network_settings_equal(&s_saved_network[index], config) &&
+           s_saved_legacy_ip[index] == config->ip;
+}
+
 extern int save_config(void);
 
 static void init_device_interface_status(void);
@@ -382,9 +451,9 @@ static int read_config_from_flash(SystemConfiguration *config)
     LOG_INFO("sizeof(flash_config.device): 0x%x\n", sizeof(flash_config.device));
     // 读取精简配置结构体
     ret = hal_flash_read(FLASH_START_ADDR, (char *)&flash_config, sizeof(SystemConfigForFlash));
-    if (ret < 0)
+    if (ret != (int)sizeof(SystemConfigForFlash))
     {
-        LOG_ERROR("Failed to read from flash: %d\n", ret);
+        LOG_ERROR("Incomplete configuration read: %d\n", ret);
         return -1;
     }
 
@@ -401,6 +470,8 @@ static int read_config_from_flash(SystemConfiguration *config)
 
     // 将精简配置复制到完整配置结构体
     memcpy(&config->device, &flash_config.device, sizeof(DeviceSettings));
+    config->device.lan_count = APP_LAN_COUNT;
+    remember_saved_network_settings(&flash_config.device);
 
     // 复制每个通道的配置，同时保持运行时缓冲区不变
     for (i = 0; i < NUM_PORTS; i++)
@@ -429,7 +500,7 @@ static int read_config_from_flash(SystemConfiguration *config)
  */
 static int write_config_to_flash(const SystemConfiguration *config)
 {
-    SystemConfigForFlash flash_config;
+    SystemConfigForFlash flash_config = {0};
     int i;
     int ret;
     LOG_INFO("Writing configuration to flash...\n");
@@ -453,9 +524,15 @@ static int write_config_to_flash(const SystemConfiguration *config)
     if (ret != FLASH_SUCCESS)
     {
         LOG_ERROR("Failed to write configuration to flash: %d\n", ret);
+        if (ret == FLASH_ERROR_COMMIT_UNCERTAIN)
+        {
+            s_saved_network_valid = 0;
+            return CONFIG_SAVE_UNCERTAIN;
+        }
         return ERROR;
     }
 
+    remember_saved_network_settings(&flash_config.device);
     LOG_INFO("Configuration successfully written to flash\n");
     return OK;
 }
@@ -476,6 +553,83 @@ int dev_config_save(void)
         LOG_ERROR("ERROR: Failed to write configuration to flash.\n");
     }
     return status;
+}
+
+/* 调用者已持有配置锁，所有选中网口先检查再一次提交。 */
+int dev_save_network_settings_locked(unsigned char target, const NetPortConfig configs[NET_NUM])
+{
+    NetPortConfig old_configs[NET_NUM];
+    uint32_t old_legacy_ip[NET_NUM];
+    unsigned int enabled_mask = (1U << APP_LAN_COUNT) - 1U;
+    int changed = 0;
+    int result;
+
+    if (configs == NULL || target == 0 || (target & ~enabled_mask) != 0)
+    {
+        return ERROR;
+    }
+    if (g_system_config.device.lock_status == LOCK_STATE_LOCKED || dev_is_rebooting())
+    {
+        return ERROR;
+    }
+    old_legacy_ip[0] = g_system_config.device.ip_address1;
+    old_legacy_ip[1] = g_system_config.device.ip_address2;
+    for (int i = 0; i < APP_LAN_COUNT; ++i)
+    {
+        if ((target & (1U << i)) == 0)
+        {
+            continue;
+        }
+        if ((configs[i].mode != IP_MODE_STATIC && configs[i].mode != IP_MODE_DHCP) ||
+            net_cfg_validate_static_settings(configs[i].ip, configs[i].mask, configs[i].gateway) != OK)
+        {
+            return ERROR;
+        }
+        dev_get_network_settings(i, &old_configs[i]);
+        if (!network_settings_equal(&old_configs[i], &configs[i]) ||
+            old_legacy_ip[i] != configs[i].ip || !dev_network_settings_are_saved(i, &configs[i]))
+        {
+            changed = 1;
+        }
+    }
+    if (changed)
+    {
+        for (int i = 0; i < APP_LAN_COUNT; ++i)
+        {
+            if ((target & (1U << i)) != 0)
+            {
+                dev_set_network_settings(i, &configs[i]);
+            }
+        }
+        result = dev_config_save();
+        if (result != OK)
+        {
+            if (result != CONFIG_SAVE_UNCERTAIN)
+            {
+                for (int i = 0; i < APP_LAN_COUNT; ++i)
+                {
+                    if ((target & (1U << i)) != 0)
+                    {
+                        dev_set_network_settings(i, &old_configs[i]);
+                    }
+                }
+                g_system_config.device.ip_address1 = old_legacy_ip[0];
+                g_system_config.device.ip_address2 = old_legacy_ip[1];
+            }
+            LOG_ERROR("Network save failed or uncertain: %d\n", result);
+            return result;
+        }
+        s_network_mirror_needs_sync = 1;
+    }
+    if (s_network_mirror_needs_sync)
+    {
+        s_network_mirror_needs_sync = save_config() != OK;
+        if (s_network_mirror_needs_sync)
+        {
+            LOG_ERROR("Primary configuration saved; network mirror update failed\n");
+        }
+    }
+    return OK;
 }
 
 // 组装设备序列号 0x2025 12 0012 000001
@@ -750,11 +904,11 @@ int dev_config_init(void)
         }
 
         save_config();
-        // 设置 MAC 地址 (LAN1)
-        set_device_mac_address(LAN1);
-        // 设置默认网络IP地址
-        printf("ip1: %x\n", g_system_config.device.ip_address1);
-        set_device_ip_address1(g_system_config.device.ip_address1);
+        if (dev_apply_all_network_settings() != OK)
+        {
+            LOG_ERROR("Failed to apply network settings\n");
+            return ERROR;
+        }
 
         return 0;
     }
@@ -780,17 +934,11 @@ int dev_config_init(void)
 
         LOG_INFO("Configuration successfully loaded from flash.\n");
 
-        // 设置 MAC 地址 (LAN1)
-        set_device_mac_address(LAN1);
-        // 设置默认网络IP地址
-        printf("ip1: %x\n", g_system_config.device.ip_address1);
-        int ret_ip = set_device_ip_address1(g_system_config.device.ip_address1);
-        if (ret_ip == 0)
+        if (dev_apply_all_network_settings() != OK)
         {
-            g_system_config.device.lan_speed1 = SPEED_1000M; // Set LAN1 speed to 1000Mbps
-            g_system_config.device.lan_state1 = LINK;        // Set LAN1 state to LINK
+            LOG_ERROR("Failed to apply network settings\n");
+            return ERROR;
         }
-        printf("g_system_config.device.lan_speed1: %d\n", g_system_config.device.lan_speed1);
 
         return OK;
     }
@@ -812,15 +960,10 @@ int dev_config_init(void)
         LOG_INFO("WARN: Failed to load configuration from flash. Loading factory defaults.\n");
         dev_config_load_defaults();
 
-        // 设置 MAC 地址 (LAN1)
-        set_device_mac_address(LAN1);
-        // 设置默认网络IP地址
-        LOG_INFO("ip1: %x\n", g_system_config.device.ip_address1);
-        int ret_ip = set_device_ip_address1(g_system_config.device.ip_address1);
-        if (ret_ip == 0)
+        if (dev_apply_all_network_settings() != OK)
         {
-            g_system_config.device.lan_speed1 = SPEED_1000M; // Set LAN1 speed to 1000Mbps
-            g_system_config.device.lan_state1 = LINK;        // Set LAN1 state to LINK
+            LOG_ERROR("Failed to apply network settings\n");
+            return ERROR;
         }
 
         // 尝试将出厂设置保存一次
@@ -1461,11 +1604,10 @@ int save_config(void)
     offset += 6;
 
     // 第二路网络信息
-    memcpy(&buffer[offset], &g_system_config.device.ip_address2, 4);
+    memcpy(&buffer[offset], &g_system_config.device.ip_address[1], 4);
     offset += 4;
 
-    // 注意：在设备结构中，所有网络接口使用相同的子网掩码和网关
-    // 这里我们仍然保存它们，保持数据结构的一致性
+    // 两路网络分别保存独立的子网掩码和网关。
     memcpy(&buffer[offset], &g_system_config.device.netmask[1], 4);
     offset += 4;
 
@@ -1478,7 +1620,7 @@ int save_config(void)
     // 使用安全的Flash写入函数将数据写入Flash
     result = hal_flash_write(FLASH_START_ADDR_NET_INFO, buffer, offset);
 
-    if (result >= 0)
+    if (result == FLASH_SUCCESS)
     {
         LOG_INFO("Network configuration saved to Flash successfully\n");
         return OK;
@@ -1492,66 +1634,95 @@ int save_config(void)
 
 /**
  * @brief 设置指定网口的 MAC 地址
- * @param lan_index 网口索引 (0=LAN1/eth1, 1=LAN2/eth2)
+ * @param lan_index 网口索引，接口名称由 net_cfg_interface_name 统一映射。
  * @return 0成功, -1失败
  */
 static int set_device_mac_address(int lan_index)
 {
-    char cmd[128] = {0};
-    char eth_name[8] = {0};
     unsigned char mac[6];
-    int ret = 0;
 
-    // 根据网口索引选择网卡名
+    if (lan_index < 0 || lan_index >= APP_LAN_COUNT)
+    {
+        return ERROR;
+    }
+    generate_mac_from_serial(&g_system_config.device.serial_no, lan_index, mac);
+    if (net_cfg_set_mac_address(lan_index, mac) != OK)
+    {
+        return ERROR;
+    }
     if (lan_index == 0)
     {
-        strcpy(eth_name, "eth0");
+        memcpy(g_system_config.device.mac_address1, mac, sizeof(mac));
     }
     else
     {
-        strcpy(eth_name, "eth2");
+        memcpy(g_system_config.device.mac_address2, mac, sizeof(mac));
     }
+    return OK;
+}
 
-    // 基于序列号生成 MAC 地址
-    generate_mac_from_serial(&g_system_config.device.serial_no, lan_index, mac);
+int dev_apply_all_network_settings(void)
+{
+    static const char *const default_ips[NET_NUM] = {"192.168.5.220", "192.168.9.220"};
+    static const char *const default_gateways[NET_NUM] = {"192.168.5.1", "192.168.9.1"};
+    int result = OK;
 
-    // 先关闭网卡 (设置MAC地址前必须先关闭网卡)
-    snprintf(cmd, sizeof(cmd), "ifconfig %s down", eth_name);
-    printf("exec cmd: %s\n", cmd);
-    ret = system(cmd);
-    if (ret == -1)
+    g_system_config.device.lan_count = APP_LAN_COUNT;
+    for (int i = 0; i < APP_LAN_COUNT; ++i)
     {
-        perror("ifconfig down failed!");
-        return -1;
-    }
+        NetPortConfig config;
 
-    // 设置 MAC 地址
-    snprintf(cmd, sizeof(cmd), "ifconfig %s hw ether %02X:%02X:%02X:%02X:%02X:%02X", eth_name, mac[0], mac[1], mac[2],
-             mac[3], mac[4], mac[5]);
-    printf("exec cmd: %s\n", cmd);
-    ret = system(cmd);
-    if (ret == -1)
-    {
-        perror("set MAC address failed!");
-        // 尝试恢复网卡
-        snprintf(cmd, sizeof(cmd), "ifconfig %s up", eth_name);
-        system(cmd);
-        return -1;
+        dev_get_network_settings(i, &config);
+        if (config.mode == IP_MODE_STATIC)
+        {
+            if (net_cfg_validate_static_settings(config.ip, config.mask, config.gateway) != OK)
+            {
+                LOG_ERROR("Invalid LAN%d settings; using factory network settings for this boot\n", i + 1);
+                config.ip = inet_addr(default_ips[i]);
+                config.mask = inet_addr("255.255.255.0");
+                config.gateway = inet_addr(default_gateways[i]);
+                dev_set_network_settings(i, &config);
+            }
+        }
+        else if (config.mode != IP_MODE_DHCP)
+        {
+            LOG_ERROR("Invalid LAN%d mode; using static factory network settings\n", i + 1);
+            config.mode = IP_MODE_STATIC;
+            config.ip = inet_addr(default_ips[i]);
+            config.mask = inet_addr("255.255.255.0");
+            config.gateway = inet_addr(default_gateways[i]);
+            dev_set_network_settings(i, &config);
+        }
+        if (set_device_mac_address(i) != OK)
+        {
+            LOG_ERROR("Failed to set LAN%d MAC\n", i + 1);
+            result = ERROR;
+            continue;
+        }
+        if (config.mode == IP_MODE_STATIC)
+        {
+            if (net_cfg_apply_settings(i, &config) != OK)
+            {
+                LOG_ERROR("Failed to apply LAN%d static settings\n", i + 1);
+                result = ERROR;
+            }
+        }
+        else if (i == 0)
+        {
+            /* 保留当前 LAN1 的旧 DHCP 启动行为，续租另行完善。 */
+            if (set_device_ip_address1(config.ip) != OK)
+            {
+                LOG_ERROR("Failed to apply legacy LAN1 DHCP address\n");
+                result = ERROR;
+            }
+        }
+        else
+        {
+            LOG_ERROR("LAN%d DHCP startup is not implemented\n", i + 1);
+            result = ERROR;
+        }
     }
-    printf("MAC address set done (LAN%d): %02X:%02X:%02X:%02X:%02X:%02X\n", lan_index + 1, mac[0], mac[1], mac[2],
-           mac[3], mac[4], mac[5]);
-
-    // 重新开启网卡
-    snprintf(cmd, sizeof(cmd), "ifconfig %s up", eth_name);
-    printf("exec cmd: %s\n", cmd);
-    ret = system(cmd);
-    if (ret == -1)
-    {
-        perror("ifconfig up failed!");
-        return -1;
-    }
-
-    return 0;
+    return result;
 }
 
 int set_device_ip_address1(uint32_t net_ip)
@@ -1578,9 +1749,9 @@ int set_device_ip_address1(uint32_t net_ip)
     printf("exec cmd: %s\n", cmd);
     // 执行命令（注意：设置网卡IP需要root权限）
     ret = system(cmd);
-    if (ret == -1)
+    if (ret != 0)
     {
-        perror("exec cmd failed!");
+        LOG_ERROR("IP command failed, status=%d\n", ret);
         return -1;
     }
     else

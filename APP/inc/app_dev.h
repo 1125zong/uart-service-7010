@@ -23,7 +23,6 @@
 #define     MAX_PASSWORD_LEN            14
 #define     SERIAL_NO_LEN               8
 
-#define     MAX_LANS                    1
 
 //配置相关
 #define CONFIG_MAGIC_NUMBER     0x4B434647  // 配置魔术字（"GFCK"，用于校验有效性）
@@ -49,6 +48,8 @@
 #define FW_VERSION_MINOR             (0x00)
 #define FW_VERSION_PATCH             (0x00)
 #define FW_VERSION_BUILD             (0x01)
+
+#define CONFIG_SAVE_UNCERTAIN (-2)
 
 /* 设备锁定标志 */
 //uint8_t device_locked_flag = 0;
@@ -537,6 +538,13 @@ int dev_config_init(void);
  * @return int OK on success, ERROR on failure.
  */
 int dev_config_save(void);
+/* 运行期间由调用者持有配置锁；启动阶段可直接调用。 */
+int dev_get_network_settings(int index, NetPortConfig *config);
+int dev_set_network_settings(int index, const NetPortConfig *config);
+int dev_network_settings_are_saved(int index, const NetPortConfig *config);
+/* 调用者必须持有 g_config_mutex。 */
+int dev_save_network_settings_locked(unsigned char target, const NetPortConfig configs[NET_NUM]);
+int dev_apply_all_network_settings(void);
 
 /**
  * @brief 加载出厂默认配置到 g_system_config

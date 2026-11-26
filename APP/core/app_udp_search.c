@@ -65,7 +65,7 @@ static int build_device_response_msg(void)
         response_msg[offset++] = dev->lan_count;
         
         /* IP地址1 (4字节，网络字节序) */
-        unsigned int ip1 = htonl(dev->ip_address1);
+        unsigned int ip1 = dev->ip_address1;
         memcpy(&response_msg[offset], &ip1, 4);
         offset += 4;
         
@@ -77,7 +77,7 @@ static int build_device_response_msg(void)
         response_msg[offset++] = dev->lan_speed1;
         
         /* IP地址2 (4字节，网络字节序) */
-        unsigned int ip2 = htonl(dev->ip_address2);
+        unsigned int ip2 = dev->ip_address2;
         memcpy(&response_msg[offset], &ip2, 4);
         offset += 4;
         

@@ -353,13 +353,13 @@ int set_uboot_env(const char *key, const char *value)
     }
 
     snprintf(command, sizeof(command), "fw_setenv %s %s", key, value);
-    printf("set_uboot_env cmd 1111111111111111111111111111111111111111111111111111111111111111: %s\n", command);
+    printf("set_uboot_env cmd: %s\n", command);
+    
     if (system(command) != 0)
     {
         fprintf(stderr, "set_uboot_env: failed to set %s=%s\n", key, value);
         return -1;
     }
-    printf("set_uboot_env cmd success: %s\n", command);
 
     return 0;
 }

@@ -11,4 +11,4 @@ guard_check=if test ${boot_attempts} -gt 0; then run guard_dec; else run guard_s
 boot_select=echo "[UBOOT] boot_slot=${boot_slot}"; if test ${boot_slot} = b; then run boot_b; else run boot_a; fi
 
 boot_slot=a
-boot_attempts=3
+boot_attempts=7

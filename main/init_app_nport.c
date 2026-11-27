@@ -10,6 +10,7 @@
 #include "hal_flash.h"
 
 #include "hal_axi16550.h"
+#include "app_version.h"
 
 // 定义编译时间宏（简化调用）
 #define COMPILE_DATE    __DATE__
@@ -17,10 +18,18 @@
 
 void print_compile_time(void)
 {
+    char ver_line[96];
+    char time_line[96];
+
+    /* 版本号来自 app_dev.h 的 FW_VERSION_*，编译时间来自 __DATE__/__TIME__ */
+    snprintf(ver_line, sizeof(ver_line), "App Version     : %s", FW_VERSION_STRING);
+    snprintf(time_line, sizeof(time_line), "App Compile Time: %s %s", COMPILE_DATE, COMPILE_TIME);
+
     printf("\r\n");
     printf("**********************************************************************************\n");
     printf("*                                                                                *\n");
-    printf("*            App Compile Time: %s %s                                             *\n", COMPILE_DATE, COMPILE_TIME);
+    printf("*            %-68s*\n", ver_line);
+    printf("*            %-68s*\n", time_line);
     printf("*                                                                                *\n");
     printf("**********************************************************************************\n");
     printf("\r\n"); 
@@ -29,8 +38,20 @@ void print_compile_time(void)
 //外部函数声明
 extern void app_start(void);
 
-int  main(void)
+int  main(int argc, char *argv[])
 {
+    /*
+     * 支持 --version / -v：只打印版本号后退出，不初始化任何资源。
+     * 便于在设备上直接查询二进制版本：
+     *   /mnt/apps/uart_service --version
+     */
+    if (argc > 1 &&
+        (strcmp(argv[1], "--version") == 0 || strcmp(argv[1], "-v") == 0))
+    {
+        printf("%s\n", FW_VERSION_STRING);
+        return 0;
+    }
+
     print_compile_time();  
 
     app_start();

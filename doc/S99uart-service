@@ -1,0 +1,222 @@
+#!/bin/sh
+#
+# /etc/init.d/S99uart-service
+#
+# Start uart_service at boot.
+#
+# The binary lives on the p3 data partition: /mnt/apps/uart_service
+# p3 is mounted to /mnt by /etc/fstab during sysinit. This script only
+# double-checks that and retries if the mount did not happen yet.
+#
+# Named S99 so it runs after all other Sxx scripts, when /mnt is ready.
+# On shutdown rcK calls "stop": the process is terminated and sync is
+# called, then the shutdown sequence unmounts /mnt safely.
+#
+# If the new binary fails to start, the previous version is restored and
+# started once. The upgrade tool keeps it next to the running binary as
+# /mnt/apps/uart_service.<version> (e.g. uart_service.V1.0.0.2). Older
+# firmware used the fixed name uart_service.bak, still honoured below.
+#
+
+NAME=uart_service
+APPDIR=/mnt/apps
+DAEMON=$APPDIR/uart_service
+BACKUP=
+PIDFILE=/var/run/uart_service.pid
+LOGFILE=/mnt/logs/uart_service.log
+LOGFILE_OLD=$LOGFILE.1
+LOG_MAX_BYTES=${LOG_MAX_BYTES:-1048576}   # 单份日志上限 1MB，保留 1 份历史
+GUARDPIDFILE=/var/run/uart_service_log.pid
+LOG_CHECK_INTERVAL=${LOG_CHECK_INTERVAL:-300}  # 运行期检查间隔（秒）
+
+# 必须与 U-Boot 默认 env 的 boot_attempts、以及升级程序 finalize_upgrade()
+# 写入的值（FW_ENV_BOOT_ATTEMPTS）保持一致，否则每次开机都会多写一次 env。
+BOOT_ATTEMPTS_MAX=${BOOT_ATTEMPTS_MAX:-7}
+
+# 日志轮转。app 以 ">>" 打开日志（O_APPEND），
+# 先复制成 .1 再截断原文件是安全的：后续写入自动落到偏移 0。
+rotate_log() {
+    [ -f "$LOGFILE" ] || return 0
+
+    size=$(wc -c < "$LOGFILE" 2>/dev/null | tr -d ' ')
+    [ -n "$size" ] || return 0
+    [ "$size" -ge "$LOG_MAX_BYTES" ] || return 0
+
+    cp -f "$LOGFILE" "$LOGFILE_OLD" 2>/dev/null
+    : > "$LOGFILE"
+    echo "log rotated (${size} bytes -> $LOGFILE_OLD)"
+}
+
+# 运行期巡检：长时间不重启也不会把分区写满
+log_guard() {
+    while :; do
+        sleep "$LOG_CHECK_INTERVAL"
+        rotate_log
+    done
+}
+
+
+# Locate the previous version kept by the upgrade tool: only one such file
+# exists at a time, take the last match so .V<ver> wins over the legacy .bak.
+find_backup() {
+    BACKUP=
+    for f in "$APPDIR/$NAME".bak "$APPDIR/$NAME".V* "$APPDIR/$NAME".unknown; do
+        [ -f "$f" ] && BACKUP="$f"
+    done
+}
+
+renew_boot_counter() {
+    # Re-arm the U-Boot retry counter, meaning "this slot is healthy".
+    # A slot is considered healthy once its own rootfs is up and writable:
+    # the app lives on the shared p3 partition, so an app failure is NOT a
+    # slot failure and must not trigger an A/B switch.
+    # Skip the write when the value is already correct to avoid erasing the
+    # U-Boot env sector on every boot.
+    if ! command -v fw_setenv >/dev/null 2>&1; then
+        echo "(no fw_setenv, skip rearm)"
+        return 0
+    fi
+
+    if [ "$(fw_printenv -n boot_attempts 2>/dev/null)" = "$BOOT_ATTEMPTS_MAX" ]; then
+        return 0
+    fi
+
+    if fw_setenv boot_attempts "$BOOT_ATTEMPTS_MAX" >/dev/null 2>&1; then
+        echo "(boot_attempts rearmed)"
+    else
+        echo "(WARN: rearm boot_attempts failed)"
+    fi
+}
+
+run_daemon() {
+    # stdin from /dev/null so the daemon does not hold the serial console
+    "$DAEMON" </dev/null >>"$LOGFILE" 2>&1 &
+    echo $! > "$PIDFILE"
+
+    # give it one second to fail fast (missing config, FPGA not loaded...)
+    sleep 1
+    kill -0 "$(cat "$PIDFILE")" 2>/dev/null
+}
+
+start() {
+    printf "Starting %s: " "$NAME"
+
+    # Rootfs is up and writable => this slot is healthy, re-arm the counter
+    # now, before starting the app. Doing it after the app would let a
+    # p3-only app failure trigger a pointless A/B switch.
+    if touch /.boot_ok_probe 2>/dev/null; then
+        rm -f /.boot_ok_probe
+        renew_boot_counter
+    else
+        echo "FAILED (rootfs not writable, U-Boot will roll back)"
+        return 1
+    fi
+
+    # app lives on p3; never start the empty directory in rootfs
+    if ! grep -q ' /mnt ' /proc/mounts; then
+        for i in 1 2 3; do
+            mount /mnt 2>/dev/null && break
+            sleep 1
+        done
+    fi
+    if ! grep -q ' /mnt ' /proc/mounts; then
+        # A missing data partition is not a boot failure of this slot:
+        # the counter was already re-armed above, so U-Boot will not
+        # switch A/B slots forever because of a p3-only problem.
+        echo "FAILED (/mnt not mounted, p3 data partition missing)"
+        return 1
+    fi
+
+    if [ ! -x "$DAEMON" ]; then
+        echo "FAILED ($DAEMON not found or not executable)"
+        return 1
+    fi
+
+    if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+        echo "already running"
+        return 0
+    fi
+
+    mkdir -p /var/run
+    mkdir -p "$(dirname "$LOGFILE")"
+
+    # 开机先按大小轮转一次，再拉起运行期巡检
+    rotate_log
+    if ! { [ -f "$GUARDPIDFILE" ] && kill -0 "$(cat "$GUARDPIDFILE")" 2>/dev/null; }; then
+        log_guard >/dev/null 2>&1 &
+        echo $! > "$GUARDPIDFILE"
+    fi
+
+    if run_daemon; then
+        echo "OK"
+        return 0
+    fi
+
+    # start failed, fall back to the previous version once
+    find_backup
+    if [ -n "$BACKUP" ] && [ -f "$BACKUP" ]; then
+        echo "FAILED, rolling back to $BACKUP"
+        cp -f "$BACKUP" "$DAEMON.restore" &&
+            mv -f "$DAEMON.restore" "$DAEMON" &&
+            chmod 755 "$DAEMON"
+
+        if run_daemon; then
+            echo "Starting $NAME (rollback): OK"
+            return 0
+        fi
+        echo "Starting $NAME (rollback): FAILED"
+    else
+        echo "FAILED (process exited, check $LOGFILE)"
+    fi
+
+    rm -f "$PIDFILE"
+    return 1
+}
+
+stop() {
+    printf "Stopping %s: " "$NAME"
+
+    # 停掉日志巡检（kill 之后 sleep 会被中断）
+    if [ -f "$GUARDPIDFILE" ]; then
+        kill "$(cat "$GUARDPIDFILE")" 2>/dev/null
+        rm -f "$GUARDPIDFILE"
+    fi
+
+    if [ -f "$PIDFILE" ]; then
+        PID="$(cat "$PIDFILE")"
+
+        kill "$PID" 2>/dev/null
+
+        # wait up to 5 seconds for a clean exit (it syncs config on exit)
+        for i in 1 2 3 4 5; do
+            kill -0 "$PID" 2>/dev/null || break
+            sleep 1
+        done
+
+        kill -9 "$PID" 2>/dev/null
+        rm -f "$PIDFILE"
+    fi
+
+    # make sure config written by the app reaches the disk before umount
+    sync
+    echo "OK"
+}
+
+case "$1" in
+    start)
+        start
+        ;;
+    stop)
+        stop
+        ;;
+    restart|reload)
+        stop
+        start
+        ;;
+    *)
+        echo "Usage: $0 {start|stop|restart}"
+        exit 1
+        ;;
+esac
+
+exit 0

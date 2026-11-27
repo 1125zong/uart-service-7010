@@ -11,6 +11,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/stat.h>    /* 用于 chmod */
+#include <dirent.h>      /* 用于扫描 apps 目录，清理旧的带版本备份 */
 #include <sys/mount.h>
 #include <pthread.h>
 #include <sys/types.h>
@@ -37,6 +38,8 @@
 
 #include "app_update_env.h"
 
+#include "app_version_info.h"
+
 
 /* --- 2. 服务器配置 --- */
 #define SERVER_PORT             19001
@@ -54,34 +57,89 @@
 #define FW_MAX_PACKAGE_SIZE (256 * 1024 * 1024)
 #endif
 
-/* eMMC A/B 分区。按当前板卡分区表填写，可用编译参数覆盖。 */
+/*
+ * eMMC A/B 分区。按当前板卡分区表填写，可用编译参数覆盖。
+ *
+ * 当前布局：
+ *   p1 = A 区，rootfs 与内核镜像 /boot/image_emmc.u 在同一个分区
+ *   p2 = B 区，rootfs 与内核镜像 /boot/image_emmc.u 在同一个分区
+ *   p3 = 数据分区，开机挂载到 /mnt，保存 app 与配置文件
+ *   p4 = 默认/恢复 rootfs，U-Boot 环境变量回落到默认值时从这里启动，
+ *        从该分区发起升级时固定写回 A 区（p1）
+ *
+ * 注意：image_dev 与 rootfs_dev 现在指向同一个分区，
+ *       升级时必须先写 rootfs，再往该分区的 /boot 目录写内核，
+ *       否则内核会被 rootfs 整体覆盖。
+ */
 #ifndef IMAGE_A_DEV
 #define IMAGE_A_DEV     "/dev/mmcblk0p1"
 #endif
 #ifndef ROOTFS_A_DEV
-#define ROOTFS_A_DEV    "/dev/mmcblk0p2"
+#define ROOTFS_A_DEV    "/dev/mmcblk0p1"
 #endif
 #ifndef IMAGE_B_DEV
-#define IMAGE_B_DEV     "/dev/mmcblk0p3"
+#define IMAGE_B_DEV     "/dev/mmcblk0p2"
 #endif
 #ifndef ROOTFS_B_DEV
-#define ROOTFS_B_DEV    "/dev/mmcblk0p4"
+#define ROOTFS_B_DEV    "/dev/mmcblk0p2"
 #endif
 
+/*
+ * p4 = 默认（恢复）rootfs。U-Boot 环境变量丢失、回落到默认值时
+ * 从这个分区启动，保证 A/B 两槽都不可信时设备仍能起来并重新升级。
+ */
+#ifndef ROOTFS_DEFAULT_DEV
+#define ROOTFS_DEFAULT_DEV  "/dev/mmcblk0p4"
+#endif
+
+/*
+ * U-Boot 默认 env 里用于引导 ROOTFS_DEFAULT_DEV 的 boot_slot 取值，
+ * 必须与 U-Boot 源码 boot_select 的判断保持一致。
+ */
+#ifndef FW_ENV_SLOT_RECOVERY
+#define FW_ENV_SLOT_RECOVERY    "default"
+#endif
+
+/* 切换槽位时写入的重试次数：FW_ENV_BOOT_ATTEMPTS 定义在 app_update_env.h */
+
+/*
+ * 升级期间的临时挂载点。
+ * 放在 /run（Buildroot 启动时挂载的 tmpfs），不占用 flash：
+ *   - 不放 /mnt：/mnt 已被 p3 数据分区占用，挂到 /mnt/xxx
+ *     会在数据分区里创建临时目录并留下残留；
+ *   - 不放 /tmp：/tmp 同样是 tmpfs，但常被应用当临时目录使用，
+ *     容易被清理逻辑误删。
+ */
 #ifndef IMAGE_MOUNT_POINT
-#define IMAGE_MOUNT_POINT   "/mnt/fw_image"
+#define IMAGE_MOUNT_POINT   "/run/fw_image"
 #endif
 #ifndef ROOTFS_MOUNT_POINT
-#define ROOTFS_MOUNT_POINT  "/mnt/fw_rootfs"
+#define ROOTFS_MOUNT_POINT  "/run/fw_rootfs"
 #endif
 
-#define KERNEL_FILE_NAME        "image.ub"
+/* 内核镜像位于 rootfs 分区的 boot 目录下 */
+#define KERNEL_FILE_NAME        "boot/image_emmc.u"
 #ifndef BITSTREAM_FILE_NAME
-#define BITSTREAM_FILE_NAME     "top_7015.bit"
+#define BITSTREAM_FILE_NAME     "boot/top_7015.bit"
 #endif
-#ifndef APP_INSTALL_PATH_IN_ROOTFS
-#define APP_INSTALL_PATH_IN_ROOTFS  "/usr/local/bin/uart-service"
+/* p3 数据分区常驻挂载点（开机由 /etc/fstab 挂载到 /mnt） */
+#ifndef P3_MOUNT_POINT
+#define P3_MOUNT_POINT      "/mnt"
 #endif
+
+/*
+ * app 不再写入 rootfs，统一写到 p3 数据分区的 apps 目录下。
+ * p3 为 A/B 共享数据分区，升级 app 不影响启动槽。
+ */
+#ifndef APP_INSTALL_PATH_ON_P3
+#define APP_INSTALL_PATH_ON_P3  P3_MOUNT_POINT "/apps/uart_service"
+#endif
+
+/*
+ * 需要写入 A/B 系统分区并切换启动槽的升级类型。
+ * app 位于 p3 共享数据分区，不属于该类，升级 app 时不必读取 boot_slot。
+ */
+#define UPDATE_FLAG_AB_WRITE    (UPDATE_FLAG_ROOTFS | UPDATE_FLAG_KERNEL | UPDATE_FLAG_BITSTREAM)
 
 typedef struct
 {
@@ -107,6 +165,8 @@ static int write_mem_to_mounted_file(const void *buf, size_t buf_len,
                                      mode_t mode);
 static int write_rootfs_to_target(const void *buf, uint32_t len,
                                   const char *dev, const char *mnt);
+static int is_path_mounted(const char *path);
+static int write_app_to_p3(const void *buf, size_t buf_len, const char *path);
 static int detect_ab_slots(FirmwareSlot *current, FirmwareSlot *target,
                            char *current_name, size_t current_name_len,
                            char *target_name, size_t target_name_len);
@@ -676,50 +736,46 @@ STATUS write_firmware_to_flash(
     FirmwareSlot target;
     char current_name[16] = {0};
     char target_name[16] = {0};
+    int need_slot;
 
-    if (detect_ab_slots(&current, &target,
-                        current_name, sizeof(current_name),
-                        target_name, sizeof(target_name)) != OK)
+    memset(&current, 0, sizeof(current));
+    memset(&target, 0, sizeof(target));
+
+    /*
+     * 只有要写 A/B 系统分区时才需要读 boot_slot。
+     * 单独升级 app 时跳过，避免 fw_printenv/fw_env.config 异常
+     * 导致与 A/B 无关的 app 升级被误判为失败。
+     */
+    need_slot = (header->update_flags & UPDATE_FLAG_AB_WRITE) != 0;
+
+    if (need_slot)
     {
-        printf("write_flash: [X] Failed to detect current boot slot\n");
-        return ERROR;
-    }
+        if (detect_ab_slots(&current, &target,
+                            current_name, sizeof(current_name),
+                            target_name, sizeof(target_name)) != OK)
+        {
+            printf("write_flash: [X] Failed to detect current boot slot\n");
+            return ERROR;
+        }
 
-    printf("write_flash: current slot=%s, target slot=%s\n", current_name, target_name);
-    printf("write_flash: target image=%s, target rootfs=%s\n",
-           target.image_dev, target.rootfs_dev);
+        printf("write_flash: current slot=%s, target slot=%s\n", current_name, target_name);
+        printf("write_flash: target slot dev=%s (rootfs + kernel in one partition)\n",
+               target.rootfs_dev);
+    }
+    else
+    {
+        printf("write_flash: no A/B system partition update, skip slot detection\n");
+    }
 
     if (header->update_flags & UPDATE_FLAG_OS)
     {
         printf("write_flash: OS segment is reserved, skip writing\n");
     }
 
-    if (header->update_flags & UPDATE_FLAG_BITSTREAM)
-    {
-        printf("write_flash: writing %u bytes bitstream to %s:%s\n",
-               header->bit_length, target.image_dev, BITSTREAM_FILE_NAME);
-        if (write_mem_to_mounted_file(bit_data, header->bit_length,
-                                      target.image_dev, IMAGE_MOUNT_POINT,
-                                      "vfat", BITSTREAM_FILE_NAME, 0644) != 0)
-        {
-            printf("write_flash: [X] failed to write bitstream\n");
-            return ERROR;
-        }
-    }
-
-    if (header->update_flags & UPDATE_FLAG_KERNEL)
-    {
-        printf("write_flash: writing %u bytes kernel to %s:%s\n",
-               header->kernel_length, target.image_dev, KERNEL_FILE_NAME);
-        if (write_mem_to_mounted_file(kernel_data, header->kernel_length,
-                                      target.image_dev, IMAGE_MOUNT_POINT,
-                                      "vfat", KERNEL_FILE_NAME, 0644) != 0)
-        {
-            printf("write_flash: [X] failed to write kernel\n");
-            return ERROR;
-        }
-    }
-
+    /*
+     * 顺序很重要：内核镜像位于 rootfs 分区的 /boot 下，
+     * 因此必须先写 rootfs（raw 镜像会整分区覆盖），再写内核和 bitstream。
+     */
     if (header->update_flags & UPDATE_FLAG_ROOTFS)
     {
         printf("write_flash: writing %u bytes rootfs to %s\n",
@@ -732,27 +788,96 @@ STATUS write_firmware_to_flash(
         }
     }
 
-    if (header->update_flags & UPDATE_FLAG_APP)
+    if (header->update_flags & UPDATE_FLAG_KERNEL)
     {
-        printf("write_flash: writing %u bytes app to %s:%s\n",
-               header->app_length, target.rootfs_dev, APP_INSTALL_PATH_IN_ROOTFS);
-        if (write_mem_to_mounted_file(app_data, header->app_length,
+        printf("write_flash: writing %u bytes kernel to %s:%s\n",
+               header->kernel_length, target.rootfs_dev, KERNEL_FILE_NAME);
+        if (write_mem_to_mounted_file(kernel_data, header->kernel_length,
                                       target.rootfs_dev, ROOTFS_MOUNT_POINT,
-                                      "ext4", APP_INSTALL_PATH_IN_ROOTFS, 0755) != 0)
+                                      "ext4", KERNEL_FILE_NAME, 0644) != 0)
         {
-            printf("write_flash: [X] failed to write app\n");
+            printf("write_flash: [X] failed to write kernel\n");
             return ERROR;
         }
     }
 
-    if (finalize_upgrade(current_name, target_name) != OK)
+    if (header->update_flags & UPDATE_FLAG_BITSTREAM)
     {
-        printf("write_flash: [X] failed to update U-Boot environment\n");
-        return ERROR;
+        printf("write_flash: writing %u bytes bitstream to %s:%s\n",
+               header->bit_length, target.rootfs_dev, BITSTREAM_FILE_NAME);
+        if (write_mem_to_mounted_file(bit_data, header->bit_length,
+                                      target.rootfs_dev, ROOTFS_MOUNT_POINT,
+                                      "ext4", BITSTREAM_FILE_NAME, 0644) != 0)
+        {
+            printf("write_flash: [X] failed to write bitstream\n");
+            return ERROR;
+        }
     }
 
-    printf("write_flash: [OK] slot %s updated, next boot slot=%s\n",
-           target_name, target_name);
+    if (header->update_flags & UPDATE_FLAG_APP)
+    {
+        printf("write_flash: writing %u bytes app to %s\n",
+               header->app_length, APP_INSTALL_PATH_ON_P3);
+        if (write_app_to_p3(app_data, header->app_length,
+                            APP_INSTALL_PATH_ON_P3) != 0)
+        {
+            printf("write_flash: [X] failed to write app to p3\n");
+            return ERROR;
+        }
+
+        /* 校验包内声明的版本与二进制自带版本是否一致（统一版本号） */
+        {
+            char pkg_ver[FW_VERSION_STRING_LEN + 1] = {0};
+            char bin_ver[64] = {0};
+
+            memcpy(pkg_ver, header->app_version, FW_VERSION_STRING_LEN);
+            if (pkg_ver[0] != '\0')
+            {
+                if (app_version_read_binary(APP_INSTALL_PATH_ON_P3,
+                                            bin_ver, sizeof(bin_ver)) == 0 &&
+                    strcmp(pkg_ver, bin_ver) != 0)
+                {
+                    printf("write_flash: [WARN] package app_version=%s, "
+                           "binary marker=%s, versions not unified\n",
+                           pkg_ver, bin_ver);
+                }
+                else
+                {
+                    printf("write_flash: app version unified: %s\n",
+                           (bin_ver[0] != '\0') ? bin_ver : pkg_ver);
+                }
+            }
+        }
+
+        printf("write_flash: app written, restart to take effect\n");
+    }
+
+    /*
+     * 只有写入了 A/B 系统分区才需要切换启动槽。
+     * app 位于 p3 共享数据分区，单独升级 app 不切槽。
+     */
+    if (need_slot)
+    {
+        /*
+         * 从恢复分区(p4)升级时没有“上一个运行槽”，不写 boot_slot_prev，
+         * 保留默认 env 里的回退目标（p4），新槽启动失败还能回到恢复系统。
+         */
+        const char *prev_slot = (strcmp(current_name, "recovery") == 0)
+                                ? NULL : current_name;
+
+        if (finalize_upgrade(prev_slot, target_name) != OK)
+        {
+            printf("write_flash: [X] failed to update U-Boot environment\n");
+            return ERROR;
+        }
+        printf("write_flash: [OK] slot %s updated, next boot slot=%s\n",
+               target_name, target_name);
+    }
+    else
+    {
+        printf("write_flash: [OK] data partition only update, boot slot unchanged\n");
+    }
+
     return OK;
 }
 
@@ -1233,6 +1358,266 @@ static int write_mem_to_block_device(const void *buf, size_t buf_len, const char
     return 0;
 }
 
+/*
+ * 判断 path 是否为当前真正挂载的挂载点。
+ * 用于确认 p3 数据分区已挂到 /mnt，避免 p3 挂载失败时
+ * app 被写进 rootfs 里的 /mnt 目录。
+ */
+static int is_path_mounted(const char *path)
+{
+    FILE *fp;
+    char line[512] = {0};
+    char target[512] = {0};
+
+    if (path == NULL || path[0] == '\0')
+    {
+        return 0;
+    }
+
+    fp = fopen("/proc/mounts", "r");
+    if (fp == NULL)
+    {
+        fprintf(stderr, "Failed to open /proc/mounts: %s\n", strerror(errno));
+        return 0;
+    }
+
+    while (fgets(line, sizeof(line), fp) != NULL)
+    {
+        target[0] = '\0';
+        if (sscanf(line, "%*s %511s", target) != 1)
+        {
+            continue;
+        }
+
+        if (strcmp(target, path) == 0)
+        {
+            fclose(fp);
+            return 1;
+        }
+    }
+
+    fclose(fp);
+    return 0;
+}
+
+/*
+ * 删除同目录下以 "<name><mid>" 开头的旧目录项，例如：
+ *   mid = ".bak"  ->  uart_service.bak、uart_service.bak.V1.0.0.0
+ *   mid = ".V"    ->  uart_service.V1.0.0.1
+ * 每次升级只保留本次新建的那一个，避免目录里越积越多。
+ * 不会误删 "<name>" 本身，也不会误删 "<name>.new"。
+ */
+static void remove_stale_links(const char *path, const char *mid)
+{
+    char dir[512] = {0};
+    char name_prefix[600] = {0};
+    const char *base;
+    const char *slash;
+    size_t dir_len;
+    size_t prefix_len;
+    DIR *d;
+    struct dirent *de;
+    int n;
+
+    if (path == NULL || mid == NULL || mid[0] == '\0')
+    {
+        return;
+    }
+
+    slash = strrchr(path, '/');
+    base = (slash != NULL) ? (slash + 1) : path;
+    dir_len = (size_t)(base - path);
+
+    if (dir_len == 0)
+    {
+        snprintf(dir, sizeof(dir), ".");
+    }
+    else if (dir_len >= sizeof(dir))
+    {
+        return;
+    }
+    else
+    {
+        memcpy(dir, path, dir_len);
+        dir[dir_len] = '\0';
+    }
+
+    n = snprintf(name_prefix, sizeof(name_prefix), "%s%s", base, mid);
+    if (n < 0 || (size_t)n >= sizeof(name_prefix))
+    {
+        return;
+    }
+    prefix_len = strlen(name_prefix);
+
+    d = opendir(dir);
+    if (d == NULL)
+    {
+        return;
+    }
+
+    while ((de = readdir(d)) != NULL)
+    {
+        char full[1024] = {0};
+
+        if (strncmp(de->d_name, name_prefix, prefix_len) != 0)
+        {
+            continue;
+        }
+
+        n = snprintf(full, sizeof(full), "%s/%s", dir, de->d_name);
+        if (n > 0 && (size_t)n < sizeof(full))
+        {
+            unlink(full);
+        }
+    }
+
+    closedir(d);
+}
+
+/*
+ * 把 app 写到 p3 数据分区。
+ *
+ * 先写 <path>.new，再 rename 覆盖原文件：
+ * 直接覆盖正在运行的可执行文件会返回 ETXTBSY；
+ * rename 是原子操作，运行中的进程继续持有旧 inode，
+ * 新程序在下次启动时生效。
+ *
+ * 升级完成后目录里固定只有两个目录项（同一 inode，不占额外空间）：
+ *   /mnt/apps/uart_service            新版本，启动脚本用
+ *   /mnt/apps/uart_service.V1.0.0.1   被替换下来的旧版本
+ * 旧程序没有版本标记时（历史遗留二进制）命名为 uart_service.unknown。
+ * 历史遗留的 .bak / .bak.<ver> 会在升级时清掉。
+ *
+ * 回滚到上一版本：
+ *   cp /mnt/apps/uart_service.V1.0.0.1 /mnt/apps/uart_service.new
+ *   mv /mnt/apps/uart_service.new /mnt/apps/uart_service
+ */
+static int write_app_to_p3(const void *buf, size_t buf_len, const char *path)
+{
+    char tmp_path[512] = {0};
+    char old_ver[64] = {0};
+    char new_ver[64] = {0};
+    char prev_link[600] = {0};
+    int old_exists = 0;
+    int old_has_ver = 0;
+    int n;
+
+    if (buf == NULL || path == NULL)
+    {
+        return -1;
+    }
+
+    if (!is_path_mounted(P3_MOUNT_POINT))
+    {
+        fprintf(stderr, "p3 data partition is not mounted at %s, "
+                        "refuse to write app\n", P3_MOUNT_POINT);
+        return -1;
+    }
+
+    {
+        int rc = app_version_read_binary(path, old_ver, sizeof(old_ver));
+
+        if (rc == APP_VERSION_OK)
+        {
+            old_exists = 1;
+            old_has_ver = 1;
+            printf("write_app_to_p3: current on-disk app version: %s\n", old_ver);
+        }
+        else if (rc == APP_VERSION_ERR_NO_FILE)
+        {
+            printf("write_app_to_p3: no app installed on p3 yet (first install)\n");
+        }
+        else
+        {
+            old_exists = 1;
+            printf("write_app_to_p3: current on-disk app version: unknown "
+                   "(old binary has no version marker)\n");
+        }
+    }
+
+    n = snprintf(tmp_path, sizeof(tmp_path), "%s.new", path);
+    if (n < 0 || n >= (int)sizeof(tmp_path))
+    {
+        fprintf(stderr, "app temp path too long\n");
+        return -1;
+    }
+
+    unlink(tmp_path);
+
+    if (write_mem_to_file(buf, buf_len, tmp_path, 0755) != 0)
+    {
+        unlink(tmp_path);
+        return -1;
+    }
+
+    /*
+     * 把即将被替换掉的旧文件挂成 <path>.<旧版本>（硬链接，同一 inode）。
+     * 必须在 rename 之前建立：此刻 path 仍指向旧 inode，rename 之后
+     * 旧 inode 就只剩这一个别名了。
+     * 同时清掉历史遗留的 .bak* 和上一轮的 .V*，目录只保留两项。
+     */
+    remove_stale_links(path, ".bak");
+    remove_stale_links(path, ".V");
+
+    if (old_exists)
+    {
+        n = snprintf(prev_link, sizeof(prev_link), "%s.%s", path,
+                     old_has_ver ? old_ver : "unknown");
+        if (n > 0 && (size_t)n < sizeof(prev_link))
+        {
+            unlink(prev_link);
+            if (link(path, prev_link) != 0)
+            {
+                fprintf(stderr, "Warning: failed to create %s: %s\n",
+                        prev_link, strerror(errno));
+                prev_link[0] = '\0';
+            }
+        }
+        else
+        {
+            prev_link[0] = '\0';
+        }
+    }
+
+    if (rename(tmp_path, path) != 0)
+    {
+        fprintf(stderr, "Failed to rename %s -> %s: %s\n",
+                tmp_path, path, strerror(errno));
+        unlink(tmp_path);
+        if (prev_link[0] != '\0')
+        {
+            /* 旧文件还留在 path 上，撤掉刚才多建的别名 */
+            unlink(prev_link);
+        }
+        return -1;
+    }
+
+    sync();
+
+    if (app_version_read_binary(path, new_ver, sizeof(new_ver)) == APP_VERSION_OK)
+    {
+        if (prev_link[0] != '\0')
+        {
+            printf("write_app_to_p3: app updated to %s, previously installed "
+                   "version kept at %s\n", new_ver, prev_link);
+        }
+        else
+        {
+            printf("write_app_to_p3: app updated to %s (no previous version)\n",
+                   new_ver);
+        }
+    }
+    else
+    {
+        printf("write_app_to_p3: app updated, but version marker not found "
+               "in new binary\n");
+    }
+
+    app_version_dump_all(path);
+
+    return 0;
+}
+
 static int write_mem_to_mounted_file(const void *buf, size_t buf_len,
                                      const char *dev, const char *mnt,
                                      const char *fstype, const char *path_in_fs,
@@ -1412,12 +1797,101 @@ static int write_rootfs_to_target(const void *buf, uint32_t len,
     return -1;
 }
 
+/*
+ * 从 /proc/cmdline 的 root= 参数推断运行槽，作为 stat 判定的兜底手段。
+ * 返回 1 = B，0 = A，2 = 默认/恢复分区(p4)，-1 = 无法判定。
+ */
+static int running_slot_from_cmdline(void)
+{
+    FILE *fp;
+    char line[512] = {0};
+    int ret = -1;
+
+    fp = fopen("/proc/cmdline", "r");
+    if (fp == NULL)
+    {
+        return -1;
+    }
+
+    if (fgets(line, sizeof(line), fp) != NULL)
+    {
+        if (strstr(line, "root=" ROOTFS_B_DEV) != NULL)
+        {
+            ret = 1;
+        }
+        else if (strstr(line, "root=" ROOTFS_A_DEV) != NULL)
+        {
+            ret = 0;
+        }
+        else if (strstr(line, "root=" ROOTFS_DEFAULT_DEV) != NULL)
+        {
+            ret = 2;
+        }
+    }
+
+    fclose(fp);
+    return ret;
+}
+
+/*
+ * 判断当前真正的运行槽：
+ *   0 = A(ROOTFS_A_DEV)，1 = B(ROOTFS_B_DEV)，
+ *   2 = 默认/恢复分区(ROOTFS_DEFAULT_DEV)，-1 = 无法判定。
+ *
+ * 只能用“正在运行的根文件系统”判断。env 里的 boot_slot 在掉电后可能
+ * 回落到默认值，若据此决定升级目标，会把正在运行的 rootfs 整块覆盖。
+ */
+static int running_slot_id(void)
+{
+    struct stat root_st;
+    struct stat a_st;
+    struct stat b_st;
+    struct stat d_st;
+
+    if (stat("/", &root_st) == 0 &&
+        stat(ROOTFS_A_DEV, &a_st) == 0 &&
+        stat(ROOTFS_B_DEV, &b_st) == 0)
+    {
+        if (root_st.st_dev == b_st.st_rdev)
+        {
+            return 1;
+        }
+
+        if (root_st.st_dev == a_st.st_rdev)
+        {
+            return 0;
+        }
+
+        /* 从默认/恢复分区启动：env 丢过、正在 p4 上重新升级 */
+        if (stat(ROOTFS_DEFAULT_DEV, &d_st) == 0 &&
+            root_st.st_dev == d_st.st_rdev)
+        {
+            return 2;
+        }
+
+        fprintf(stderr, "running_slot_id: root dev %lu matches neither %s, %s nor %s, "
+                        "falling back to /proc/cmdline\n",
+                (unsigned long)root_st.st_dev, ROOTFS_A_DEV, ROOTFS_B_DEV,
+                ROOTFS_DEFAULT_DEV);
+    }
+    else
+    {
+        fprintf(stderr, "running_slot_id: stat failed: %s, "
+                        "falling back to /proc/cmdline\n", strerror(errno));
+    }
+
+    return running_slot_from_cmdline();
+}
+
 static int detect_ab_slots(FirmwareSlot *current, FirmwareSlot *target,
                            char *current_name, size_t current_name_len,
                            char *target_name, size_t target_name_len)
 {
     char env_slot[32] = {0};
     int current_is_b = 0;
+    int running_id;
+    int running_is_b = 0;
+    int need_fix_env = 0;
 
     if (current == NULL || target == NULL ||
         current_name == NULL || target_name == NULL ||
@@ -1426,24 +1900,103 @@ static int detect_ab_slots(FirmwareSlot *current, FirmwareSlot *target,
         return -1;
     }
 
-    if (get_uboot_env("boot_slot", env_slot, sizeof(env_slot)) != 0)
+    /*
+     * 以“正在运行的根分区”为准，env 只作参考。
+     * env 掉电损坏后 boot_slot 会回落到默认值，若据此决定目标槽，
+     * 会把正在运行的 rootfs 整块覆盖，设备当场报废。
+     */
+    running_id = running_slot_id();
+    if (running_id < 0)
     {
-        fprintf(stderr, "Failed to read boot_slot. Refuse upgrade to avoid writing the running slot.\n");
+        fprintf(stderr, "detect_ab_slots: cannot determine running slot "
+                        "(root dev matches none of %s, %s, %s), refuse upgrade\n",
+                ROOTFS_A_DEV, ROOTFS_B_DEV, ROOTFS_DEFAULT_DEV);
         return -1;
     }
 
-    if (env_slot[0] == 'b' || env_slot[0] == 'B' || strcmp(env_slot, "1") == 0)
+    /*
+     * 从默认/恢复分区(p4)启动：说明 env 丢过或者两个槽都不再可信。
+     * 此时不覆盖任何运行中的 A/B 分区也无从判断，统一回写到 A 槽，
+     * 并把 boot_slot 复位成 a；boot_slot_prev 由调用方置空，
+     * 失败时仍回到 U-Boot 默认 env 引导的恢复分区。
+     */
+    if (running_id == 2)
     {
-        current_is_b = 1;
+        if (get_uboot_env("boot_slot", env_slot, sizeof(env_slot)) != 0)
+        {
+            printf("detect_ab_slots: [WARN] boot_slot unreadable, "
+                   "restore it to %s\n", FW_ENV_SLOT_RECOVERY);
+
+            if (set_uboot_env("boot_slot", FW_ENV_SLOT_RECOVERY) != 0)
+            {
+                fprintf(stderr, "detect_ab_slots: failed to restore boot_slot, "
+                                "refuse upgrade\n");
+                return -1;
+            }
+        }
+
+        current->name = "recovery";
+        current->image_dev = ROOTFS_DEFAULT_DEV;
+        current->rootfs_dev = ROOTFS_DEFAULT_DEV;
+        target->name = "a";
+        target->image_dev = IMAGE_A_DEV;
+        target->rootfs_dev = ROOTFS_A_DEV;
+
+        printf("detect_ab_slots: [WARN] running on recovery rootfs %s, "
+               "target slot forced to %s\n", ROOTFS_DEFAULT_DEV, target->name);
+
+        snprintf(current_name, current_name_len, "%s", current->name);
+        snprintf(target_name, target_name_len, "%s", target->name);
+        return 0;
     }
-    else if (env_slot[0] == 'a' || env_slot[0] == 'A' || strcmp(env_slot, "0") == 0)
+
+    running_is_b = (running_id == 1);
+    current_is_b = running_is_b;
+
+    if (get_uboot_env("boot_slot", env_slot, sizeof(env_slot)) != 0)
     {
-        current_is_b = 0;
+        printf("detect_ab_slots: [WARN] boot_slot unreadable, "
+               "restore it to %s from running rootfs\n",
+               running_is_b ? "b" : "a");
+        need_fix_env = 1;
     }
     else
     {
-        fprintf(stderr, "Unknown boot_slot=%s. Refuse upgrade.\n", env_slot);
-        return -1;
+        int env_is_b = -1;
+
+        if (env_slot[0] == 'b' || env_slot[0] == 'B' || strcmp(env_slot, "1") == 0)
+        {
+            env_is_b = 1;
+        }
+        else if (env_slot[0] == 'a' || env_slot[0] == 'A' || strcmp(env_slot, "0") == 0)
+        {
+            env_is_b = 0;
+        }
+
+        if (env_is_b < 0)
+        {
+            printf("detect_ab_slots: [WARN] unknown boot_slot=%s, "
+                   "correcting to %s\n", env_slot, running_is_b ? "b" : "a");
+            need_fix_env = 1;
+        }
+        else if (env_is_b != running_is_b)
+        {
+            printf("detect_ab_slots: [WARN] env boot_slot=%s but running on %s, "
+                   "correcting env before upgrade\n",
+                   env_slot, running_is_b ? "b" : "a");
+            need_fix_env = 1;
+        }
+    }
+
+    if (need_fix_env)
+    {
+        /* 纠正失败就拒绝升级：宁可这次不升，也不能写坏正在运行的槽 */
+        if (set_uboot_env("boot_slot", running_is_b ? "b" : "a") != 0)
+        {
+            fprintf(stderr, "detect_ab_slots: failed to correct boot_slot, "
+                            "refuse upgrade\n");
+            return -1;
+        }
     }
 
     if (current_is_b)
@@ -1465,35 +2018,316 @@ static int detect_ab_slots(FirmwareSlot *current, FirmwareSlot *target,
         target->rootfs_dev = ROOTFS_B_DEV;
     }
 
+    printf("detect_ab_slots: running rootfs = %s, current slot = %s, "
+           "target slot = %s\n",
+           current->rootfs_dev, current->name, target->name);
+
     snprintf(current_name, current_name_len, "%s", current->name);
     snprintf(target_name, target_name_len, "%s", target->name);
     return 0;
 }
 
+/* finalize_upgrade() 批量写 env 时使用的临时文件与备份路径 */
+#define FW_ENV_ALL_TMP_FILE     "/tmp/fw_env_all.txt"
+#define FW_ENV_NEW_TMP_FILE     "/tmp/fw_env_new.txt"
+#define FW_ENV_BACKUP_PATH      P3_MOUNT_POINT "/env.backup"
+
+/*
+ * 把整份 U-Boot 环境变量导出到 path（每行 key=value）。
+ * 走 fw_printenv，不自己解析 flash 布局，避免与 U-Boot 的 env 格式脱节。
+ */
+static int env_export_all(const char *path)
+{
+    char cmd[512] = {0};
+
+    if (path == NULL || path[0] == '\0')
+    {
+        return -1;
+    }
+
+    snprintf(cmd, sizeof(cmd), "fw_printenv > %s 2>/dev/null", path);
+    if (system(cmd) != 0)
+    {
+        fprintf(stderr, "env_export_all: fw_printenv failed (%s)\n", path);
+        return -1;
+    }
+
+    return 0;
+}
+
+/*
+ * 以 src 为基础生成 dst：删掉 keys[] 里已有的行，再追加 keys=vals。
+ * 生成的文件交给 fw_setenv -s 一次写入，把多次擦写 env 扇区压成一次。
+ */
+static int env_build_merged_file(const char *src, const char *dst,
+                                 const char *const *keys,
+                                 const char *const *vals, int count)
+{
+    FILE *in;
+    FILE *out;
+    char line[2048] = {0};
+    int i;
+
+    if (src == NULL || dst == NULL || keys == NULL || vals == NULL || count <= 0)
+    {
+        return -1;
+    }
+
+    in = fopen(src, "r");
+    if (in == NULL)
+    {
+        fprintf(stderr, "env_build_merged_file: open %s failed: %s\n",
+                src, strerror(errno));
+        return -1;
+    }
+
+    out = fopen(dst, "w");
+    if (out == NULL)
+    {
+        fprintf(stderr, "env_build_merged_file: open %s failed: %s\n",
+                dst, strerror(errno));
+        fclose(in);
+        return -1;
+    }
+
+    while (fgets(line, sizeof(line), in) != NULL)
+    {
+        int skip = 0;
+
+        for (i = 0; i < count; i++)
+        {
+            size_t klen = strlen(keys[i]);
+
+            if (strncmp(line, keys[i], klen) == 0 && line[klen] == '=')
+            {
+                skip = 1;
+                break;
+            }
+        }
+
+        if (!skip)
+        {
+            fputs(line, out);
+        }
+    }
+
+    for (i = 0; i < count; i++)
+    {
+        fprintf(out, "%s=%s\n", keys[i], vals[i]);
+    }
+
+    fclose(in);
+
+    if (fclose(out) != 0)
+    {
+        fprintf(stderr, "env_build_merged_file: write %s failed: %s\n",
+                dst, strerror(errno));
+        return -1;
+    }
+
+    return 0;
+}
+
+/* 判断导出的 env 文本里是否含有某个 key= 行，用于识别“导出的是默认值” */
+static int env_file_contains(const char *path, const char *key)
+{
+    FILE *fp;
+    char line[2048] = {0};
+    size_t klen;
+    int found = 0;
+
+    if (path == NULL || key == NULL)
+    {
+        return 0;
+    }
+
+    fp = fopen(path, "r");
+    if (fp == NULL)
+    {
+        return 0;
+    }
+
+    klen = strlen(key);
+
+    while (fgets(line, sizeof(line), fp) != NULL)
+    {
+        if (strncmp(line, key, klen) == 0)
+        {
+            found = 1;
+            break;
+        }
+    }
+
+    fclose(fp);
+    return found;
+}
+
+static int copy_file(const char *src, const char *dst)
+{
+    FILE *in;
+    FILE *out;
+    char buf[1024];
+    size_t n;
+    int ret = 0;
+
+    if (src == NULL || dst == NULL)
+    {
+        return -1;
+    }
+
+    in = fopen(src, "rb");
+    if (in == NULL)
+    {
+        return -1;
+    }
+
+    out = fopen(dst, "wb");
+    if (out == NULL)
+    {
+        fclose(in);
+        return -1;
+    }
+
+    while ((n = fread(buf, 1, sizeof(buf), in)) > 0)
+    {
+        if (fwrite(buf, 1, n, out) != n)
+        {
+            ret = -1;
+            break;
+        }
+    }
+
+    fclose(in);
+    if (fclose(out) != 0)
+    {
+        ret = -1;
+    }
+
+    return ret;
+}
+
+/*
+ * 写 U-Boot 启动槽信息：boot_slot_prev / boot_attempts / boot_slot。
+ *
+ * 与旧实现（连续 3 次 fw_setenv）不同，这里把三个变量合并成一次写入：
+ *   - 只擦写一次 env 扇区，掉电窗口从 3 个降到 1 个；
+ *   - 三个变量同时生效，不存在“只切了一半”的中间态。
+ *
+ * 写入前会把完整 env 备份到 p3（/mnt/env.backup），写坏后可直接
+ *   fw_setenv -s /mnt/env.backup
+ * 恢复。写完回读校验，三个值全部正确才算成功。
+ */
 static STATUS finalize_upgrade(const char *current_slot, const char *target_slot)
 {
-    if (current_slot == NULL || target_slot == NULL)
+    const char *env_keys[3] = {0};
+    const char *env_vals[3] = {0};
+    char got[64] = {0};
+    int count = 0;
+    int i;
+
+    if (target_slot == NULL)
     {
         return ERROR;
     }
 
-    if (set_uboot_env("boot_slot_prev", current_slot) != 0)
+    /*
+     * current_slot == NULL 表示“从恢复分区升级”：不写 boot_slot_prev，
+     * 保留 U-Boot 默认 env 里的回退目标（恢复分区），
+     * 这样新槽启动失败时还能回到 p4。
+     */
+    if (current_slot != NULL)
     {
-        fprintf(stderr, "Failed to set boot_slot_prev\n");
+        env_keys[count] = "boot_slot_prev";
+        env_vals[count] = current_slot;
+        count++;
+    }
+
+    env_keys[count] = "boot_attempts";
+    env_vals[count] = FW_ENV_BOOT_ATTEMPTS;
+    count++;
+
+    env_keys[count] = "boot_slot";
+    env_vals[count] = target_slot;
+    count++;
+
+    /* 1) 导出当前 env；内容看着完整才备份，避免坏 env 覆盖上一份好备份 */
+    if (env_export_all(FW_ENV_ALL_TMP_FILE) != 0)
+    {
+        fprintf(stderr, "finalize_upgrade: failed to dump current env\n");
         return ERROR;
     }
 
-    if (set_uboot_env("boot_attempts", "3") != 0)
+    if (env_file_contains(FW_ENV_ALL_TMP_FILE, "bootcmd="))
     {
-        fprintf(stderr, "Failed to set boot_attempts\n");
+        if (is_path_mounted(P3_MOUNT_POINT) &&
+            copy_file(FW_ENV_ALL_TMP_FILE, FW_ENV_BACKUP_PATH) == 0)
+        {
+            printf("finalize_upgrade: env backed up to %s\n", FW_ENV_BACKUP_PATH);
+        }
+        else
+        {
+            printf("finalize_upgrade: [WARN] failed to back up env to %s\n",
+                   FW_ENV_BACKUP_PATH);
+        }
+    }
+    else
+    {
+        printf("finalize_upgrade: [WARN] dumped env looks incomplete (no bootcmd), "
+               "keep previous backup at %s\n", FW_ENV_BACKUP_PATH);
+    }
+
+    /* 2) 替换三个变量 → 一次写回 */
+    if (env_build_merged_file(FW_ENV_ALL_TMP_FILE, FW_ENV_NEW_TMP_FILE,
+                              env_keys, env_vals, count) != 0)
+    {
+        remove(FW_ENV_ALL_TMP_FILE);
         return ERROR;
     }
 
-    /* 最后切换 boot_slot，保证试运行标志先于新槽生效 */
-    if (set_uboot_env("boot_slot", target_slot) != 0)
     {
-        fprintf(stderr, "Failed to set boot_slot\n");
-        return ERROR;
+        char cmd[512] = {0};
+
+        snprintf(cmd, sizeof(cmd), "fw_setenv -s %s", FW_ENV_NEW_TMP_FILE);
+        printf("finalize_upgrade: %s\n", cmd);
+
+        if (system(cmd) != 0)
+        {
+            /* 老版本 fw_setenv 可能不支持 -s，退回逐个写入 */
+            printf("finalize_upgrade: [WARN] fw_setenv -s failed, "
+                   "fall back to sequential setenv\n");
+
+            for (i = 0; i < count; i++)
+            {
+                if (set_uboot_env(env_keys[i], env_vals[i]) != 0)
+                {
+                    fprintf(stderr, "finalize_upgrade: failed to set %s\n",
+                            env_keys[i]);
+                    remove(FW_ENV_ALL_TMP_FILE);
+                    remove(FW_ENV_NEW_TMP_FILE);
+                    return ERROR;
+                }
+            }
+        }
+    }
+
+    remove(FW_ENV_ALL_TMP_FILE);
+    remove(FW_ENV_NEW_TMP_FILE);
+
+    /* 3) 回读校验，写入的每个变量都必须生效 */
+    for (i = 0; i < count; i++)
+    {
+        memset(got, 0, sizeof(got));
+
+        if (get_uboot_env(env_keys[i], got, sizeof(got)) != 0 ||
+            strcmp(got, env_vals[i]) != 0)
+        {
+            fprintf(stderr, "finalize_upgrade: verify %s failed "
+                            "(got '%s', want '%s')\n",
+                    env_keys[i], got, env_vals[i]);
+            return ERROR;
+        }
+
+        printf("finalize_upgrade: %s=%s verified\n", env_keys[i], got);
     }
 
     sync();

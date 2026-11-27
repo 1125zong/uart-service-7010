@@ -717,6 +717,51 @@ int dev_tcp_server_port_available_locked(int channel_index, unsigned int port)
 	return 1;
 }
 
+/*
+ * 把当前二进制的编译期版本同步到 flash 配置的 device.firmware_version[4]。
+ *
+ * 屏幕显示、上位机 0x01 查询、UDP 搜索都读这个字段，而它只在默认配置
+ * （首次启动 / 恢复出厂）时被赋值，正常升级 app 后 flash 里仍是旧版本号。
+ * 因此启动时比对一次：不一致才更新并写回 flash，避免每次开机都擦写。
+ * 返回 0 表示已一致或已成功同步，-1 表示写 flash 失败。
+ */
+static int dev_config_sync_firmware_version(void)
+{
+	unsigned char *ver = g_system_config.device.firmware_version;
+	int changed = 0;
+
+	if (ver[0] != FW_VERSION_MAJOR || ver[1] != FW_VERSION_MINOR ||
+		ver[2] != FW_VERSION_PATCH || ver[3] != FW_VERSION_BUILD)
+	{
+		LOG_INFO("Firmware version changed: config V%u.%u.%u.%u -> %s, "
+				 "updating flash config",
+				 (unsigned)ver[0], (unsigned)ver[1],
+				 (unsigned)ver[2], (unsigned)ver[3],
+				 FW_VERSION_STRING);
+
+		ver[0] = FW_VERSION_MAJOR;
+		ver[1] = FW_VERSION_MINOR;
+		ver[2] = FW_VERSION_PATCH;
+		ver[3] = FW_VERSION_BUILD;
+
+		if (dev_config_save() != OK)
+		{
+			LOG_ERROR("ERROR: failed to save firmware version to flash config");
+			return -1;
+		}
+
+		changed = 1;
+	}
+
+	/* 一份日志里同时给出 4 字节字段与字符串版本，便于现场核对 */
+	LOG_INFO("Firmware version: config V%u.%u.%u.%u, binary %s%s",
+			 (unsigned)ver[0], (unsigned)ver[1],
+			 (unsigned)ver[2], (unsigned)ver[3],
+			 FW_VERSION_STRING, changed ? " (config updated)" : "");
+
+	return 0;
+}
+
 int dev_config_init(void)
 {
     int ret;
@@ -749,12 +794,25 @@ int dev_config_init(void)
             return ERROR; // 返回错误，表示启动时未找到有效配置
         }
 
+<<<<<<< Updated upstream
         save_config();
         // 设置 MAC 地址 (LAN1)
         set_device_mac_address(LAN1);
         // 设置默认网络IP地址
         printf("ip1: %x\n", g_system_config.device.ip_address1);
         set_device_ip_address1(g_system_config.device.ip_address1);
+=======
+		save_config();
+
+		/* 恢复出厂后配置里的版本已是本次编译的宏版本，这里只做核对日志 */
+		dev_config_sync_firmware_version();
+
+		// 设置 MAC 地址 (LAN1)
+		set_device_mac_address(LAN1);
+		// 设置默认网络IP地址
+		printf("ip1: %x\n", g_system_config.device.ip_address1);
+		set_device_ip_address1(g_system_config.device.ip_address1);
+>>>>>>> Stashed changes
 
         return 0;
     }
@@ -792,8 +850,28 @@ int dev_config_init(void)
         }
         printf("g_system_config.device.lan_speed1: %d\n", g_system_config.device.lan_speed1);
 
+<<<<<<< Updated upstream
         return OK;
     }
+=======
+		/*
+		 * 配置里的固件版本可能落后于当前二进制（升级 app 后 flash 未刷新），
+		 * 这里同步一次，保证屏幕/上位机/UDP 搜索上报的版本与实际一致。
+		 */
+		dev_config_sync_firmware_version();
+
+		// 设置 MAC 地址 (LAN1)
+		set_device_mac_address(LAN1);
+		// 设置默认网络IP地址
+		printf("ip1: %x\n", g_system_config.device.ip_address1);
+		int ret_ip = set_device_ip_address1(g_system_config.device.ip_address1);
+		if (ret_ip == 0)
+		{
+			g_system_config.device.lan_speed1 = SPEED_1000M; // Set LAN1 speed to 1000Mbps
+			g_system_config.device.lan_state1 = LINK;		 // Set LAN1 state to LINK
+		}
+		printf("g_system_config.device.lan_speed1: %d\n", g_system_config.device.lan_speed1);
+>>>>>>> Stashed changes
 
     // else if(ret == (-1))
     // {
@@ -833,8 +911,16 @@ int dev_config_init(void)
         save_config();
     }
 
+<<<<<<< Updated upstream
     return 0;
 }
+=======
+		save_config();
+
+		/* 默认配置里的版本就是本次编译的宏版本，这里只做核对日志 */
+		dev_config_sync_firmware_version();
+	}
+>>>>>>> Stashed changes
 
 /*
  * 调用时必须持有 g_config_mutex。

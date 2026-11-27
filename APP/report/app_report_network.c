@@ -10,6 +10,7 @@
 
 #include "app_com.h"
 #include "app_report_network.h"
+#include "app_net_cfg.h"
 #include "hal_flash.h"
 #include "app_dev.h"  // 包含设备配置头文件
 #include <string.h>   // 包含memcpy等函数
@@ -42,20 +43,30 @@ extern int set_device_ip_address1(uint32_t net_ip);
  */
 void handle_network_settings(int client_fd, unsigned char *data, int len)
 {
-    unsigned char sub_id = data[3];
-    //unsigned char main_id = data[2];
-    
-    LOG_INFO("  Action: Network Settings, main_id=0x%02X  SubID=0x%02X\n", data[2], sub_id);
-    
-    if (sub_id == 0x01) 
-    { 
-    	/* 读取网络设置 */
+    unsigned char sub_id;
+
+    if (data == NULL || len < 6)
+    {
+        return;
+    }
+    sub_id = data[3];
+    if (data[0] != 0xA5 || data[1] != 0xA5 || data[2] != 0x03 ||
+        data[len - 2] != 0x5A || data[len - 1] != 0x5A || (sub_id == 0x01 && len != 6))
+    {
+        send_report_response(client_fd, 0x03, sub_id, FAILED);
+        return;
+    }
+    if (sub_id == 0x01)
+    {
         handle_read_network_settings(client_fd, data);
     }
     else if (sub_id == 0x02)
-    { 
-    	/* 设置网络设置 */
+    {
         handle_write_network_settings(client_fd, data, len);
+    }
+    else
+    {
+        send_report_response(client_fd, 0x03, sub_id, FAILED);
     }
 }
 
@@ -64,159 +75,96 @@ void handle_network_settings(int client_fd, unsigned char *data, int len)
  */
 static void handle_write_network_settings(int client_fd, unsigned char *data, int len)
 {
-    uint8_t main_id = data[2];
-    uint8_t sub_id  = data[3];
-    
-    if(len < 0)
+    NetPortConfig configs[NET_NUM] = {0};
+    unsigned int enabled_mask = (1U << APP_LAN_COUNT) - 1U;
+    unsigned char target;
+    int result = ERROR;
+    int need_dhcp = 0;
+
+    if (data == NULL || len < 6)
     {
-        LOG_ERROR("  ERROR: Invalid data length\n");
-    }
- 
-    unsigned char network_path   = data[4]; // 0x01:第一路, 0x02:第二路, 0x03:两路同时
-    unsigned char ip_config_mode = data[5];//动态或静态设置
-    if(network_path == 0x01 )
-    {
-        LOG_INFO("  Network path: 0x%02X\n", network_path);
-        LOG_INFO("setting network path 1\n");
-    }
-    else if (network_path == 0x02 ) 
-    {
-        LOG_INFO("  Network path: 0x%02X\n", network_path);
-        LOG_INFO("setting network path 2\n");
-    }
-    else if(network_path == 0x03)
-    {
-        LOG_INFO("setting network path both 1&&2\n");
-    }
-    
-    LOG_INFO("  IP Config Mode: %s\n", ip_config_mode == 0x01 ? "Static" : "Dynamic");
-       
-    //检查设备是否锁定
-    if (is_device_locked()) 
-    {
-        LOG_ERROR("  ERROR: Device is locked, cannot update network settings\n");
-        send_report_response(client_fd, main_id, sub_id, FAILED);
         return;
     }
-    
-    semTake(g_config_mutex, WAIT_FOREVER);
-
-    //静态设置ip地址
-    if(ip_config_mode == 0x01)
+    target = data[4];
+    if (target == 0 || (target & ~enabled_mask) != 0)
     {
-        if (network_path == 0x01 || network_path == 0x03) { /* 设置第一路网络 */
-            /* 网络模式 */
-            g_system_config.device.ip_config_mode[0] = data[5];
-            /* IP地址1 */
-            unsigned int new_ip1;
-            new_ip1 = data[6] << 24 | data[7] << 16 | data[8] << 8 | data[9];
-
-            LOG_INFO("new_ip1: 0x%04x\n", new_ip1);
-
-            g_system_config.device.ip_address[0] = (new_ip1);
-            
-            g_system_config.device.ip_address1 = (new_ip1);
-            
-            /* 子网掩码1 */
-            unsigned int new_mask1;
-            new_mask1 = data[10] << 24 | data[11] << 16 | data[12] << 8 | data[13];
-            g_system_config.device.netmask[0] = (new_mask1);
-        
-            /* 网关1 */
-            unsigned int new_gw1;        
-            new_gw1 = data[14] << 24 | data[15] << 16 | data[16] << 8 | data[17];
-            g_system_config.device.gateway[0] = (new_gw1);
-            
-            /* 立即生效：配置第一路静态IP */
-            {
-                //set_device_ip_address1(new_ip1);
-            }
-                
-        }
-        
-        if (network_path == 0x02 || network_path == 0x03) 
-        { 
-            /* 设置第二路网络 */
-            int base_offset = (network_path == 0x02) ? 6 : 19; // 如果只设置第二路，偏移从5开始；如果同时设置两路，偏移从18开始
-            
-            /* 网络模式 */
-            if (network_path == 0x02) {
-                g_system_config.device.ip_config_mode[1] = data[5];
-            }
-            if (network_path == 0x03) {
-                g_system_config.device.ip_config_mode[1] = data[18];
-            }
-            
-            /* IP地址2 */
-            unsigned int new_ip2;
-            //memcpy(&new_ip2, &data[base_offset], 4);
-            new_ip2 = data[base_offset] << 24 | data[base_offset + 1] << 16 | data[base_offset + 2] << 8 | data[base_offset + 3];
-            g_system_config.device.ip_address[1] = (new_ip2);
-            g_system_config.device.ip_address2 = (new_ip2);
-            
-            /* 立即生效：配置第二路静态IP */
-            {
-#if 0
-                char cmd[256];
-                struct in_addr ip4_addr;
-                ip4_addr.s_addr = new_ip2;
-                snprintf(cmd, sizeof(cmd), "ifconfig eth1 %s netmask 255.255.255.0",
-                         inet_ntoa(ip4_addr));
-                system(cmd);
-                LOG_INFO("  Static IP applied: eth1 %s\n", inet_ntoa(ip4_addr));
-#endif
-            }
-        }
+        LOG_ERROR("Unsupported network target: 0x%02X\n", target);
+        send_report_response(client_fd, 0x03, 0x02, FAILED);
+        return;
     }
-
-    //动态设置ip地址
-    else if(ip_config_mode == 0x02)
+    if ((target == 0x03 && len != 33) ||
+        (target != 0x03 && len != 20 && !(target == 0x01 && len == 33)) ||
+        data[len - 2] != 0x5A || data[len - 1] != 0x5A)
     {
-        char ip[INET_ADDRSTRLEN];  // 用来接收获取到的Ip
-        char netmask[32];
-        char gateway[32];
-        if (dhcp("eth0", ip, sizeof(ip), netmask, sizeof(netmask), gateway, sizeof(gateway)) == 0) 
+        LOG_ERROR("Invalid network frame length or tail\n");
+        send_report_response(client_fd, 0x03, 0x02, FAILED);
+        return;
+    }
+    /* 每个网口为 mode(1) + IP(4) + mask(4) + gateway(4)。 */
+    for (int i = 0; i < APP_LAN_COUNT; ++i)
+    {
+        int offset;
+
+        if ((target & (1U << i)) == 0)
         {
-            printf("调用成功,IP = %s\n", ip); // 这里直接用 ip 即可
-            printf("掩码: %s\n", netmask);
-            printf("网关: %s\n", gateway);
-            
-            /* 网络模式 */
-            g_system_config.device.ip_config_mode[0] = ip_config_mode;
-            /* IP地址1 */
-            
-
-            g_system_config.device.ip_address[0] = inet_addr(ip);
-            
-            g_system_config.device.ip_address1 = inet_addr(ip);
-            
-            /* 子网掩码1 */
-            g_system_config.device.netmask[0] = inet_addr(netmask);
-        
-            /* 网关1 */
-            g_system_config.device.gateway[0] = inet_addr(gateway);
-
-
-        } 
-        else 
+            continue;
+        }
+        offset = target == 0x03 ? 5 + i * 13 : 5;
+        configs[i].mode = data[offset];
+        memcpy(&configs[i].ip, data + offset + 1, 4);
+        memcpy(&configs[i].mask, data + offset + 5, 4);
+        memcpy(&configs[i].gateway, data + offset + 9, 4);
+        if (configs[i].mode == IP_MODE_STATIC)
         {
-            LOG_INFO("DHCP failed\n");
-            //解锁返回
-            send_report_response(client_fd, main_id, sub_id, FAILED);
-            semGive(g_config_mutex);
+            if (net_cfg_validate_static_settings(configs[i].ip, configs[i].mask, configs[i].gateway) != OK)
+            {
+                LOG_ERROR("Invalid LAN%d static settings\n", i + 1);
+                send_report_response(client_fd, 0x03, 0x02, FAILED);
+                return;
+            }
+        }
+        else if (configs[i].mode == IP_MODE_DHCP && target == 0x01)
+        {
+            need_dhcp = 1;
+        }
+        else
+        {
+            LOG_ERROR("Unsupported LAN%d mode or mixed DHCP request\n", i + 1);
+            send_report_response(client_fd, 0x03, 0x02, FAILED);
             return;
-
         }
     }
+    if (semTake(g_config_mutex, WAIT_FOREVER) != OK)
+    {
+        send_report_response(client_fd, 0x03, 0x02, FAILED);
+        return;
+    }
+    if (g_system_config.device.lock_status == LOCK_STATE_LOCKED || dev_is_rebooting())
+    {
+        goto unlock;
+    }
+    if (need_dhcp)
+    {
+        char ip_text[INET_ADDRSTRLEN] = {0};
+        char mask_text[INET_ADDRSTRLEN] = {0};
+        char gateway_text[INET_ADDRSTRLEN] = {0};
 
-    //保存配置
-    save_config();
-    
+        /* 本轮保留原 LAN1 DHCP 获取和恢复旧地址行为。 */
+        if (dhcp(net_cfg_interface_name(0), ip_text, sizeof(ip_text), mask_text, sizeof(mask_text),
+                 gateway_text, sizeof(gateway_text)) != 0 ||
+            net_cfg_parse_ipv4(ip_text, &configs[0].ip) != OK ||
+            net_cfg_parse_ipv4(mask_text, &configs[0].mask) != OK ||
+            net_cfg_parse_ipv4(gateway_text, &configs[0].gateway) != OK)
+        {
+            LOG_ERROR("LAN1 DHCP acquisition failed\n");
+            goto unlock;
+        }
+    }
+    result = dev_save_network_settings_locked(target, configs);
+
+unlock:
     semGive(g_config_mutex);
-     
-    /* 发送ACK */
-    send_report_response(client_fd,  main_id,   sub_id, SUCCESSED);
-    LOG_INFO("  Network settings updated successfully\n");
+    send_report_response(client_fd, 0x03, 0x02, result == OK ? SUCCESSED : FAILED);
 }
 
 /**
@@ -273,7 +221,7 @@ static void handle_read_network_settings(int client_fd, unsigned char *data)
         {
             response[offset++] = g_system_config.device.ip_config_mode[1];           
             /* IP地址2 */
-            temp_ip = (g_system_config.device.ip_address2);
+            temp_ip = g_system_config.device.ip_address[1];
             memcpy(&response[offset], &temp_ip, 4);
             offset += 4;
             

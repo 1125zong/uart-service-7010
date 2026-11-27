@@ -50,8 +50,8 @@ static void process_report_command(ReportClientSession *session, unsigned char *
 {
     LOG_DEBUG("ReportManagerTask: Received %d bytes from fd=%d\n", len, session->fd);
 
-    /* 检查最小帧长度：帧头(2) + 功能ID(1) + 帧尾(2) = 5字节 */
-    if (len < 5) 
+    /* 检查最小帧长度：帧头(2) + 功能ID(1) + 子功能ID(1) + 帧尾(2) = 6字节 */
+    if (len < 6)
     {
         LOG_WARN("ReportManagerTask: Frame too short (len=%d)\n", len);
         return;
@@ -119,48 +119,133 @@ static void process_report_command(ReportClientSession *session, unsigned char *
 /**
  * @brief 处理客户端接收到的数据
  */
+/* 0=等待更多数据，-1=无效，正数=完整帧长度。 */
+static int report_frame_length(const unsigned char *data, int length)
+{
+    int expected;
+
+    if (length < 4)
+    {
+        return 0;
+    }
+    if (data[2] == 0x03)
+    {
+        if (data[3] == 0x01)
+        {
+            if (length < 6)
+            {
+                return 0;
+            }
+            return data[4] == 0x5A && data[5] == 0x5A ? 6 : -1;
+        }
+        if (data[3] == 0x02)
+        {
+            if (length < 5)
+            {
+                return 0;
+            }
+            if (data[4] == 0x03)
+            {
+                expected = 33;
+            }
+            else if (data[4] == 0x01 || data[4] == 0x02)
+            {
+                if (length < 20)
+                {
+                    return 0;
+                }
+                if (data[18] == 0x5A && data[19] == 0x5A)
+                {
+                    return 20;
+                }
+                /* 仅 LAN1 兼容旧上位机额外携带的占位记录。 */
+                if (data[4] != 0x01 || (data[18] != IP_MODE_STATIC && data[18] != IP_MODE_DHCP))
+                {
+                    return -1;
+                }
+                expected = 33;
+            }
+            else
+            {
+                return -1;
+            }
+            if (length < expected)
+            {
+                return 0;
+            }
+            return data[expected - 2] == 0x5A && data[expected - 1] == 0x5A ? expected : -1;
+        }
+    }
+    /* 其他功能保持原帧尾规则。 */
+    for (int i = 4; i + 1 < length; ++i)
+    {
+        if (data[i] == 0x5A && data[i + 1] == 0x5A)
+        {
+            return i + 2;
+        }
+    }
+    return 0;
+}
+
 static int handle_report_client_data(ReportClientSession *session)
 {
-    int nbytes;
-    int ret;
-    unsigned char temp_buffer[1024];
+    ssize_t count;
+    int remaining = REPORT_BUFFER_SIZE - session->rx_bytes;
 
-    /* 从socket读取数据 */
-    nbytes = recv(session->fd, temp_buffer, sizeof(temp_buffer), 0);
-    LOG_INFO("ReportManagerTask: Received %d bytes from fd=%d\n", nbytes, session->fd);
-    
-    if (nbytes <= 0) 
+    if (remaining <= 0)
     {
-        /* 连接关闭或出错 */
-        if (nbytes == 0)
-        {
-            LOG_INFO("ReportManagerTask: Client disconnected (fd=%d)\n", session->fd);
-            
-        } 
-        
-        /* 防止重复关闭已关闭的socket */
-        if (session->fd >= 0) 
-        {
-        	shutdown(session->fd, SHUT_RDWR);
-            ret = close(session->fd);  
-            if ( ret < 0)
-            {
-                printf("disconnect error: %s(errno: %d)\n", strerror(errno), errno);
-            }
-        }       
-        session->fd = -1;
-        session->active = 0;
-        session->rx_bytes = 0;
-        return nbytes;
+        LOG_ERROR("Report receive buffer full, closing fd=%d\n", session->fd);
+        goto disconnect;
     }
-    
-
-    /* 更新最后活动时间 */
+    count = recv(session->fd, session->rx_buffer + session->rx_bytes, (size_t)remaining, 0);
+    if (count < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK))
+    {
+        return 1;
+    }
+    if (count <= 0)
+    {
+        goto disconnect;
+    }
+    session->rx_bytes += (int)count;
     session->last_activity_time = time(NULL);
 
-    /* 处理接收到的数据 */
-    process_report_command(session, temp_buffer, nbytes);
-    return nbytes;
+    while (session->rx_bytes >= 2)
+    {
+        int frame_length;
+
+        if (session->rx_buffer[0] != 0xA5 || session->rx_buffer[1] != 0xA5)
+        {
+            --session->rx_bytes;
+            memmove(session->rx_buffer, session->rx_buffer + 1, (size_t)session->rx_bytes);
+            continue;
+        }
+        frame_length = report_frame_length(session->rx_buffer, session->rx_bytes);
+        if (frame_length == 0)
+        {
+            break;
+        }
+        if (frame_length < 0)
+        {
+            --session->rx_bytes;
+            memmove(session->rx_buffer, session->rx_buffer + 1, (size_t)session->rx_bytes);
+            continue;
+        }
+        process_report_command(session, session->rx_buffer, frame_length);
+        session->rx_bytes -= frame_length;
+        memmove(session->rx_buffer, session->rx_buffer + frame_length, (size_t)session->rx_bytes);
+    }
+    return (int)count;
+
+disconnect:
+    if (session->fd >= 0)
+    {
+        shutdown(session->fd, SHUT_RDWR);
+        close(session->fd);
+    }
+    session->fd = -1;
+    session->active = 0;
+    session->rx_bytes = 0;
+    return 0;
 }
 /**
  * @brief 上报管理任务主函数

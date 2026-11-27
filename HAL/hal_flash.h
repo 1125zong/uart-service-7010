@@ -35,6 +35,8 @@ extern "C" {
 #define FLASH_ERROR_ADDR    -1
 #define FLASH_ERROR_SIZE    -2
 #define FLASH_ERROR_HW      -3
+/* 文件已替换，但目录同步失败，不能认定旧文件仍未改变。 */
+#define FLASH_ERROR_COMMIT_UNCERTAIN (-4)
 
 
 

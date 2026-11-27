@@ -7,6 +7,10 @@
  *
  * =====================================================================================
  */
+#include "app_net_cfg.h"
+#include <errno.h>
+#include <sys/wait.h>
+#include <unistd.h>
 #include <time.h>      // For inactivity timeout check
 #include <stdlib.h>    // For atoi, etc.
 #include <arpa/inet.h> // For htonl, ntohl etc.
@@ -513,48 +517,174 @@ static void cleanup_config_connection(int index)
     s_num_active_sessions--;
 }
 
-/**
- * @brief 设置网络接口的IP地址、子网掩码和默认网关。
- *
- * @param interface_name 网络接口名称 (例如 "fei0").
- * @param ip_address 要设置的IP地址 (例如 "192.168.1.10").
- * @param netmask 要设置的子网掩码 (例如 "255.255.255.0".
- * @param gateway 要设置的默认网关 (例如 "192.168.1.1".
- * @return 0 表示成功, -1 表示失败.
- */
-int net_cfg_set_network_settings(const char *interface_name, const char *ip_address, const char *netmask,
-                                 const char *gateway)
+/* 接口名只在此处维护；LAN2 沿用旧 MAC 设置的 eth2，启用前应核实硬件。 */
+static const char *const s_lan_interfaces[NET_NUM] = {"eth0", "eth2"};
+
+const char *net_cfg_interface_name(int index)
 {
-    char command_buffer[128];
+    if (index < 0 || index >= NET_NUM)
+    {
+        return NULL;
+    }
+    return s_lan_interfaces[index];
+}
 
-    /******************************************************************/
-    /* 1. 使用 ifconfig 设置 IP 地址和子网掩码                          */
-    /******************************************************************/
-    // 构造 ifconfig 命令: "interface ip_address netmask xxx.xxx.xxx.xxx"
-    snprintf(command_buffer, sizeof(command_buffer), "%s %s netmask %s", interface_name, ip_address, netmask);
+int net_cfg_parse_ipv4(const char *text, uint32_t *address)
+{
+    unsigned char bytes[4];
+    const char *p = text;
 
-    printf("Executing ifconfig command: '%s'\n", command_buffer);
-    //    if (ifconfig(command_buffer) != 0) // 假设成功返回 0
-    //    {
-    //        perror("ifconfig failed");
-    //        return -1;
-    //    }
-    printf("Successfully set IP address and netmask.\n");
+    if (text == NULL || address == NULL)
+    {
+        return ERROR;
+    }
+    for (int i = 0; i < 4; ++i)
+    {
+        unsigned int value = 0;
+        int digits = 0;
 
-    /******************************************************************/
-    /* 2. 使用 routec 添加默认网关                                    */
-    /******************************************************************/
-    // 构造 routec 命令: "add default gateway_ip"
-    // 根据 routec 文档, "default" 是默认路由的目标地址
-    snprintf(command_buffer, sizeof(command_buffer), "add default %s", gateway);
+        while (*p >= '0' && *p <= '9')
+        {
+            value = value * 10 + (unsigned int)(*p++ - '0');
+            if (++digits > 3 || value > 255)
+            {
+                return ERROR;
+            }
+        }
+        if (digits == 0 || (i < 3 ? *p != '.' : *p != '\0'))
+        {
+            return ERROR;
+        }
+        bytes[i] = (unsigned char)value;
+        if (i < 3)
+        {
+            ++p;
+        }
+    }
+    memcpy(address, bytes, sizeof(bytes));
+    return OK;
+}
 
-    printf("Executing routec command: '%s'\n", command_buffer);
-    //    if (routec(command_buffer) != 0) // 假设成功返回 0
-    //    {
-    //        perror("routec failed to set default gateway");
-    //        return -1;
-    //    }
-    printf("Successfully set default gateway.\n");
+// 判断一个 IPv4 地址是否属于可用的单播地址
+static int net_cfg_is_unicast(uint32_t host_ip)
+{
+    unsigned int first = host_ip >> 24;
+    return first != 0 && first != 127 && first < 224;
+}
 
-    return 0;
+int net_cfg_validate_static_settings(uint32_t ip, uint32_t mask, uint32_t gateway)
+{
+    uint32_t host_ip = ntohl(ip);
+    uint32_t host_mask = ntohl(mask);
+    uint32_t host_gateway = ntohl(gateway);
+    uint32_t host_bits = ~host_mask;
+
+    if (host_mask == 0 || host_bits < 3 || (host_bits & (host_bits + 1U)) != 0)
+    {
+        return ERROR;
+    }
+    if (!net_cfg_is_unicast(host_ip) || (host_ip & host_bits) == 0 || (host_ip & host_bits) == host_bits)
+    {
+        return ERROR;
+    }
+    if (host_gateway != 0 && (!net_cfg_is_unicast(host_gateway) || host_gateway == host_ip || (host_gateway & host_mask) != (host_ip & host_mask) ||
+         (host_gateway & host_bits) == 0 || (host_gateway & host_bits) == host_bits))
+    {
+        return ERROR;
+    }
+    return OK;
+}
+
+/* 只在启动应用配置时执行程序，不通过 shell 拼接命令。 */
+static int net_cfg_run_program(char *const arguments[])
+{
+    pid_t child = fork();
+    int status;
+
+    if (child < 0)
+    {
+        return ERROR;
+    }
+    if (child == 0)
+    {
+        execvp(arguments[0], arguments);
+        _exit(127);
+    }
+    while (waitpid(child, &status, 0) < 0)
+    {
+        if (errno != EINTR)
+        {
+            return ERROR;
+        }
+    }
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
+    {
+        LOG_ERROR("Network command failed: %s, status=%d\n", arguments[0], status);
+        return ERROR;
+    }
+    return OK;
+}
+
+int net_cfg_set_mac_address(int index, const unsigned char mac[6])
+{
+    const char *interface_name = net_cfg_interface_name(index);
+    char mac_text[18];
+    int result;
+    int up_result;
+
+    if (index < 0 || index >= APP_LAN_COUNT || interface_name == NULL || mac == NULL)
+    {
+        return ERROR;
+    }
+    snprintf(mac_text, sizeof(mac_text), "%02X:%02X:%02X:%02X:%02X:%02X", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    char *down_args[] = {"ifconfig", (char *)interface_name, "down", NULL};
+    char *mac_args[] = {"ifconfig", (char *)interface_name, "hw", "ether", mac_text, NULL};
+    char *up_args[] = {"ifconfig", (char *)interface_name, "up", NULL};
+
+    if (net_cfg_run_program(down_args) != OK)
+    {
+        return ERROR;
+    }
+    result = net_cfg_run_program(mac_args);
+    up_result = net_cfg_run_program(up_args);
+    return result == OK && up_result == OK ? OK : ERROR;
+}
+
+int net_cfg_apply_settings(int index, const NetPortConfig *config)
+{
+    const char *interface_name = net_cfg_interface_name(index);
+    char ip_text[INET_ADDRSTRLEN];
+    char mask_text[INET_ADDRSTRLEN];
+    char gateway_text[INET_ADDRSTRLEN];
+    char metric_text[12];
+
+    if (index < 0 || index >= APP_LAN_COUNT || interface_name == NULL || config == NULL ||
+        config->mode != IP_MODE_STATIC ||
+        net_cfg_validate_static_settings(config->ip, config->mask, config->gateway) != OK)
+    {
+        return ERROR;
+    }
+    if (inet_ntop(AF_INET, &config->ip, ip_text, sizeof(ip_text)) == NULL ||
+        inet_ntop(AF_INET, &config->mask, mask_text, sizeof(mask_text)) == NULL ||
+        inet_ntop(AF_INET, &config->gateway, gateway_text, sizeof(gateway_text)) == NULL)
+    {
+        return ERROR;
+    }
+    snprintf(metric_text, sizeof(metric_text), "%u", 100U + (unsigned int)index * 100U);
+    char *address_args[] = {"ifconfig", (char *)interface_name, ip_text, "netmask", mask_text, "up", NULL};
+        /* 明确限定 IPv4 默认路由，保留当前接口的同网段直连路由。 */
+    char *clear_args[] = {"ip", "-4", "route", "flush", "exact", "0.0.0.0/0", "dev", (char *)interface_name, NULL};
+    char *gateway_args[] = {"ip", "route", "add", "default", "via", gateway_text, "dev", (char *)interface_name, "metric", metric_text, NULL};
+
+    if (net_cfg_run_program(address_args) != OK || net_cfg_run_program(clear_args) != OK)
+    {
+        return ERROR;
+    }
+    if (config->gateway != 0 && net_cfg_run_program(gateway_args) != OK)
+    {
+        return ERROR;
+    }
+    LOG_INFO("LAN%d applied: interface=%s IP=%s mask=%s gateway=%s metric=%s\n",
+             index + 1, interface_name, ip_text, mask_text, gateway_text, metric_text);
+    return OK;
 }

@@ -7,7 +7,8 @@
  #include "key.h"
 #define FONT_WIDTH 18
 #define SCREEN_WIDTH_CHARS (320 / FONT_WIDTH) // 20个字符
-#define NUM_LAN_PORTS 1
+#include "app_lan_config.h"
+#define NUM_LAN_PORTS APP_LAN_COUNT
 /*
  * ==========================================================================
  * 1. 驱动抽象层 (Display Driver Interface)

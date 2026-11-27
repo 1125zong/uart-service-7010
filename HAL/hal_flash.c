@@ -193,62 +193,137 @@ static uint32_t calculate_file_offset(uint32_t flashStart)
  * @param nbytes 要写入的字节数
  * @return 成功返回FLASH_SUCCESS，失败返回错误码
  */
-int hal_flash_write(uint32_t flashStart, const char * buf, uint32_t nbytes)
+static int write_config_bytes(int fd, const char *buffer, uint32_t length)
 {
-    if (buf == NULL || nbytes == 0) 
+    size_t offset = 0;
+
+    while (offset < length)
     {
-        return FLASH_ERROR_HW;
+        ssize_t count = write(fd, buffer + offset, length - offset);
+        if (count < 0 && errno == EINTR)
+        {
+            continue;
+        }
+        if (count <= 0)
+        {
+            return FLASH_ERROR_HW;
+        }
+        offset += (size_t)count;
     }
-    
-    // 检查地址范围
-    if (flashStart < FLASH_START_ADDR_MIN || flashStart >= FLASH_END_ADDR) 
+    while (fsync(fd) != 0)
     {
-        printf("Error: Flash write start address 0x%08X is out of range [0x%08X - 0x%08X)\n",
-               flashStart, FLASH_START_ADDR_MIN, FLASH_END_ADDR);
-        return FLASH_ERROR_ADDR;
+        if (errno != EINTR)
+        {
+            return FLASH_ERROR_HW;
+        }
     }
-    
-    uint32_t endAddr = flashStart + nbytes;
-    if (endAddr > FLASH_END_ADDR) 
+    return FLASH_SUCCESS;
+}
+
+/* 主配置和网络镜像均为完整文件，使用同目录临时文件替换。 */
+static int replace_config_file(const char *path, const char *buffer, uint32_t length)
+{
+    char temporary[PATH_MAX];
+    int dir_fd = -1;
+    int fd = -1;
+    int result = FLASH_ERROR_HW;
+    int name_length = snprintf(temporary, sizeof(temporary), "%s.tmp.XXXXXX", path);
+
+    if (name_length < 0 || (size_t)name_length >= sizeof(temporary))
     {
-        printf("Error: Flash write end address 0x%08X exceeds maximum address 0x%08X\n",
-               endAddr, FLASH_END_ADDR);
         return FLASH_ERROR_SIZE;
     }
-    
-    // 确保配置目录存在
-    if (ensure_config_dir() != 0) 
+    dir_fd = open(CONFIG_DIR, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (dir_fd < 0)
     {
         return FLASH_ERROR_HW;
     }
-    
-    // 获取相应的文件路径
-    const char* file_path = get_file_path_for_address(flashStart);
-    if (file_path == NULL) {
-        printf("Error: Invalid flash address 0x%08X\n", flashStart);
+    fd = mkstemp(temporary);
+    if (fd < 0)
+    {
+        close(dir_fd);
+        return FLASH_ERROR_HW;
+    }
+    if (fchmod(fd, 0644) != 0 || write_config_bytes(fd, buffer, length) != FLASH_SUCCESS)
+    {
+        goto cleanup;
+    }
+    if (close(fd) != 0)
+    {
+        fd = -1;
+        goto cleanup;
+    }
+    fd = -1;
+    if (rename(temporary, path) != 0)
+    {
+        goto cleanup;
+    }
+
+    /* rename 是提交点；提交后的同步故障不能误报为“磁盘仍是旧值”。 */
+    result = FLASH_ERROR_COMMIT_UNCERTAIN;
+    while (fsync(dir_fd) != 0)
+    {
+        if (errno != EINTR)
+        {
+            goto cleanup;
+        }
+    }
+    result = FLASH_SUCCESS;
+
+cleanup:
+    if (fd >= 0)
+    {
+        close(fd);
+    }
+    unlink(temporary);
+    close(dir_fd);
+    return result;
+}
+
+int hal_flash_write(uint32_t flashStart, const char *buf, uint32_t nbytes)
+{
+    const char *file_path;
+    int fd;
+    int result;
+
+    if (buf == NULL || nbytes == 0)
+    {
+        return FLASH_ERROR_HW;
+    }
+    if (flashStart < FLASH_START_ADDR_MIN || flashStart >= FLASH_END_ADDR)
+    {
         return FLASH_ERROR_ADDR;
     }
-    printf("file_path: %s\n",  file_path);
-    
-    // 以读写模式打开文件（如果不存在则创建）
-    int fd = open(file_path, O_RDWR|O_CREAT);
-    if (fd == -1) {
-        printf("Error: Cannot open file %s for writing: %s\n", file_path, strerror(errno));
+    if (nbytes > FLASH_END_ADDR - flashStart)
+    {
+        return FLASH_ERROR_SIZE;
+    }
+    if (ensure_config_dir() != 0)
+    {
         return FLASH_ERROR_HW;
     }
-    
-    // 写入数据
-    size_t written = write(fd, buf, nbytes);
-    if (written != nbytes) {
-        printf("Error: Only wrote %zu of %u bytes to %s\n", written, nbytes, file_path);
-        close(fd);
+    file_path = get_file_path_for_address(flashStart);
+    if (file_path == NULL)
+    {
+        return FLASH_ERROR_ADDR;
+    }
+    if (flashStart == FLASH_START_ADDR || flashStart == FLASH_START_ADDR_NET_INFO)
+    {
+        return replace_config_file(file_path, buf, nbytes);
+    }
+
+    /* 其他地址保留原文件映射，只修正权限、写入和同步检查。 */
+    fd = open(file_path, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
+    if (fd < 0)
+    {
         return FLASH_ERROR_HW;
     }
-    
-    // 确保数据写入磁盘
-    close(fd);
-    
-    return FLASH_SUCCESS;
+    result = write_config_bytes(fd, buf, nbytes);
+    if (close(fd) != 0)
+    {
+        return FLASH_ERROR_HW;
+    }
+    return result;
 }
 
 /**

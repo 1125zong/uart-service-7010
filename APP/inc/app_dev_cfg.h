@@ -24,7 +24,7 @@
 #endif
 
 //--------------------------------------------------------------------------------------
-#define NET_NUM 2
+#include "app_lan_config.h"
 //--- Real COM Mode 默认配置参数 ---
 #define DEFAULT_COM_BAUDRATE                115200
 

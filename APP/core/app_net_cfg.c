@@ -672,7 +672,8 @@ int net_cfg_apply_settings(int index, const NetPortConfig *config)
     }
     snprintf(metric_text, sizeof(metric_text), "%u", 100U + (unsigned int)index * 100U);
     char *address_args[] = {"ifconfig", (char *)interface_name, ip_text, "netmask", mask_text, "up", NULL};
-    char *clear_args[] = {"ip", "route", "flush", "default", "dev", (char *)interface_name, NULL};
+        /* 明确限定 IPv4 默认路由，保留当前接口的同网段直连路由。 */
+    char *clear_args[] = {"ip", "-4", "route", "flush", "exact", "0.0.0.0/0", "dev", (char *)interface_name, NULL};
     char *gateway_args[] = {"ip", "route", "add", "default", "via", gateway_text, "dev", (char *)interface_name, "metric", metric_text, NULL};
 
     if (net_cfg_run_program(address_args) != OK || net_cfg_run_program(clear_args) != OK)

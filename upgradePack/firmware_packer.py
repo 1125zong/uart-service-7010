@@ -38,6 +38,7 @@ import argparse
 import struct
 import zlib
 import os
+import re
 import sys
 from datetime import datetime
 
@@ -233,6 +234,39 @@ def load_file(filepath):
         return None
 
 
+def read_app_version_from_header(header_path=None):
+    """
+    从 app_version.h 读取固件版本，保证打包时写入的 app_version
+    与二进制内部自带的版本标记完全一致。
+
+    Returns:
+        str | None: 例如 "V1.0.0.1"，读取失败返回 None
+    """
+    if header_path is None:
+        header_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            'APP', 'inc', 'app_version.h')
+
+    try:
+        with open(header_path, 'r', encoding='utf-8') as f:
+            text = f.read()
+    except Exception:
+        return None
+
+    def grab(name):
+        m = re.search(r'^\s*#define\s+' + name + r'\s+(\d+)', text, re.M)
+        return m.group(1) if m else None
+
+    major = grab('FW_VERSION_MAJOR')
+    minor = grab('FW_VERSION_MINOR')
+    patch = grab('FW_VERSION_PATCH')
+    build = grab('FW_VERSION_BUILD')
+
+    if None in (major, minor, patch, build):
+        return None
+    return f"V{major}.{minor}.{patch}.{build}"
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='固件打包工具 - 打包 Bitstream、OS、App 组件',
@@ -288,8 +322,8 @@ def main():
                         help='Bitstream 版本号 (默认: v1.0.0)')
     parser.add_argument('--os-version', type=str, default='v1.0.0',
                         help='OS 版本号 (默认: v1.0.0)')
-    parser.add_argument('--app-version', type=str, default='v1.0.0',
-                        help='App 版本号 (默认: v1.0.0)')
+    parser.add_argument('--app-version', type=str, default=None,
+                        help='App 版本号 (默认: 自动读取 APP/inc/app_version.h)')
     parser.add_argument('--kernel-version', type=str, default='v1.0.0',
                         help='Kernel 版本号 (默认: v1.0.0)')
     parser.add_argument('--rootfs-version', type=str, default='v1.0.0',
@@ -315,6 +349,15 @@ def main():
         print("错误: 必须至少指定一个组件 (--bitstream, --os, --app, --kernel, 或 --rootfs)")
         parser.print_help()
         sys.exit(1)
+
+    # App 版本默认从 app_version.h 读取，避免包内版本与二进制版本不一致
+    if args.app and not args.app_version:
+        auto_ver = read_app_version_from_header()
+        if auto_ver:
+            args.app_version = auto_ver
+            print(f"提示: 未指定 --app-version，已从 app_version.h 读取: {auto_ver}")
+        else:
+            print("警告: 无法从 app_version.h 读取版本，回退为 v1.0.0")
 
     # 验证文件
     bit_data = None
@@ -439,7 +482,7 @@ def main():
     try:
         with open(args.output, 'wb') as f:
             f.write(package)
-        print(f"✓ 固件包已生成: {args.output}")
+        print(f"[OK] 固件包已生成: {args.output}")
         print(f"  总大小: {len(package):,} (0x{len(package):X}) 字节 ({len(package)/1024/1024:.2f} MB)")
         print("=" * 60)
     except Exception as e:

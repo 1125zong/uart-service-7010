@@ -10,6 +10,7 @@
  */
 #include <sys/mount.h>
 #include <unistd.h>
+#include <string.h>
 #include "app_com.h"
 #include "app_udp_search.h"
 #include "app_net_cfg.h"
@@ -25,6 +26,7 @@
 #include "app_watchdog.h"
 #include "app_crash_handler.h"
 #include "app_led.h"
+#include "app_version_info.h"
 
 extern void cleanup_pl_memory_access(void);
 static int mount_jffs2(void);
@@ -76,24 +78,8 @@ void app_start(void)
     int ret;
     log_init(LOG_LEVEL_DEBUG);
 
-
-#if 0
-    {
-        char boot_slot[16] = {0};
-
-        if (get_uboot_env("boot_slot", boot_slot, sizeof(boot_slot)) == 0)
-        {
-            printf("[BOOT] boot_slot=%s, rootfs=%s\n",
-                   boot_slot,
-                   (boot_slot[0] == 'b' || boot_slot[0] == 'B') ?
-                   "/dev/mmcblk0p4(rootfs_b)" : "/dev/mmcblk0p2(rootfs_a)");
-        }
-        else
-        {
-            printf("[BOOT] boot_slot is not set, current slot unknown\n");
-        }
-    }
-#endif
+    /* 打印正在运行 / 磁盘上两份版本，便于确认升级前后版本 */
+    app_version_dump_all(APP_INSTALL_BIN_PATH);
 
     // FPGA_Info_Read();
     if (init_global_resources() != OK)
@@ -103,7 +89,7 @@ void app_start(void)
     }
 
     // echo_fw_config();
-    // mount_jffs2();
+     //mount_jffs2();
     ret = dev_config_init();
 
     /* 配置加载成功后，将RX/TX镜像端口恢复到FPGA */
@@ -154,10 +140,22 @@ void app_start(void)
         LOG_ERROR("Failed to start LED task, error=%d\n", ret);
     }
 
-    /* 业务启动成功，刷新启动计数，避免 U-Boot 连续失败切槽 */
-    if (set_uboot_env("boot_attempts", "3") != 0)
+    /*
+     * 业务启动成功，刷新启动计数，避免 U-Boot 连续失败切槽。
+     * 值已经是 FW_ENV_BOOT_ATTEMPTS 时不再写，避免每次开机多擦一次 env；
+     * S99uart-service 在开机早期也会做同样的续期，两者互为兜底。
+     */
     {
-        printf("Warning: failed to refresh boot_attempts\n");
+        char attempts[16] = {0};
+
+        if (get_uboot_env("boot_attempts", attempts, sizeof(attempts)) != 0 ||
+            strcmp(attempts, FW_ENV_BOOT_ATTEMPTS) != 0)
+        {
+            if (set_uboot_env("boot_attempts", FW_ENV_BOOT_ATTEMPTS) != 0)
+            {
+                printf("Warning: failed to refresh boot_attempts\n");
+            }
+        }
     }
     sync();
 

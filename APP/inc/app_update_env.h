@@ -76,6 +76,16 @@ int get_uboot_env(const char *var_name, char *out_buf, size_t buf_len);
 
 /* --- 环境变量配置常量 --- */
 
+/*
+ * A/B 启动重试次数的统一取值（写回 boot_attempts 时使用）。
+ * 必须与下面两处一致，否则每次开机都会多写一次 env：
+ *   1) U-Boot 默认 env 的 boot_attempts
+ *   2) /etc/init.d/S99uart-service 的 BOOT_ATTEMPTS_MAX
+ */
+#ifndef FW_ENV_BOOT_ATTEMPTS
+#define FW_ENV_BOOT_ATTEMPTS    "7"
+#endif
+
 /* 冗余分区地址 */
 #define ENV_BASE_ADDR_A  0x1830000  /* 分区A地址 */
 #define ENV_BASE_ADDR_B  0x1840000  /* 分区B地址 */

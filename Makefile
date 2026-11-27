@@ -58,6 +58,7 @@ APP_SOURCES = \
     $(APP_CORE_DIR)/app_udp_search.c \
     $(APP_CORE_DIR)/app_update.c \
     $(APP_CORE_DIR)/app_update_env.c \
+    $(APP_CORE_DIR)/app_version_info.c \
     $(APP_CORE_DIR)/app_watchdog.c
 
 # Report source files

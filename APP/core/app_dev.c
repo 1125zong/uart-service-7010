@@ -871,6 +871,38 @@ int dev_tcp_server_port_available_locked(int channel_index, unsigned int port)
 	return 1;
 }
 
+/*
+ * 同步编译期版本到配置；仅在版本变化时写回，保持升级后的版本上报一致。
+ */
+static int dev_config_sync_firmware_version(void)
+{
+    unsigned char *ver = g_system_config.device.firmware_version;
+    int changed = 0;
+
+    if (ver[0] != FW_VERSION_MAJOR || ver[1] != FW_VERSION_MINOR || ver[2] != FW_VERSION_PATCH ||
+        ver[3] != FW_VERSION_BUILD)
+    {
+        LOG_INFO("Firmware version changed: config V%u.%u.%u.%u -> %s, updating flash config",
+                 (unsigned)ver[0], (unsigned)ver[1], (unsigned)ver[2], (unsigned)ver[3], FW_VERSION_STRING);
+
+        ver[0] = FW_VERSION_MAJOR;
+        ver[1] = FW_VERSION_MINOR;
+        ver[2] = FW_VERSION_PATCH;
+        ver[3] = FW_VERSION_BUILD;
+
+        if (dev_config_save() != OK)
+        {
+            LOG_ERROR("ERROR: failed to save firmware version to flash config");
+            return ERROR;
+        }
+        changed = 1;
+    }
+
+    LOG_INFO("Firmware version: config V%u.%u.%u.%u, binary %s%s", (unsigned)ver[0], (unsigned)ver[1],
+             (unsigned)ver[2], (unsigned)ver[3], FW_VERSION_STRING, changed ? " (config updated)" : "");
+    return OK;
+}
+
 int dev_config_init(void)
 {
     int ret;
@@ -904,6 +936,7 @@ int dev_config_init(void)
         }
 
         save_config();
+        dev_config_sync_firmware_version();
         if (dev_apply_all_network_settings() != OK)
         {
             LOG_ERROR("Failed to apply network settings\n");
@@ -940,6 +973,7 @@ int dev_config_init(void)
             return ERROR;
         }
 
+        dev_config_sync_firmware_version();
         return OK;
     }
 
@@ -974,6 +1008,7 @@ int dev_config_init(void)
         }
 
         save_config();
+        dev_config_sync_firmware_version();
     }
 
     return 0;

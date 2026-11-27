@@ -43,11 +43,9 @@
 #define DEVICE_SERIAL_NO_DAY         (0x01)
 #define DEVICE_NUMBER                (0x000001)    
 
-//固件版本
-#define FW_VERSION_MAJOR             (0x01)        
-#define FW_VERSION_MINOR             (0x00)
-#define FW_VERSION_PATCH             (0x00)
-#define FW_VERSION_BUILD             (0x01)
+/* 固件版本号（FW_VERSION_MAJOR/MINOR/PATCH/BUILD、FW_VERSION_STRING）
+ * 定义在 app_version.h 中，作为唯一版本源 */
+#include "app_version.h"
 
 #define CONFIG_SAVE_UNCERTAIN (-2)
 
